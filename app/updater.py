@@ -379,6 +379,11 @@ def apply_update(
         # Pick up any schema changes the new version ships before it boots.
         db.init_db()
 
+        # We are now *on* the commit we thought was "latest", so record that.
+        # Otherwise the admin page keeps showing "update available" against a
+        # commit we already installed, until the next scheduled check.
+        db.set_setting(conn, "latest_known_commit", target)
+
         _log_finish(
             conn, log_id, "success",
             f"Updated {from_commit[:8]} -> {target[:8]}.", target, new_version,

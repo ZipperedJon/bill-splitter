@@ -122,6 +122,11 @@ def test_applies_a_good_update():
         assert box.head() == target
         assert box.version() == "9.9.9"
 
+        # Having just installed it, the app must not still advertise it.
+        with db.cursor() as conn:
+            assert db.get_setting(conn, "latest_known_commit") == target
+            assert updater.status(conn)["update_available"] is False
+
 
 def test_broken_update_is_rolled_back_and_the_app_stays_up():
     """The safety net: if the new code will not import, go back and stay alive."""
