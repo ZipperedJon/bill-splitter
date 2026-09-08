@@ -182,6 +182,13 @@ What the person opening it gets, in three taps:
 Their choice of name is remembered in that browser, so coming back to the link
 does not ask again.
 
+**Sending it.** The link is copied to your clipboard the moment you create it,
+and again if you click it, so it is ready to paste without reaching for Ctrl+C.
+On a phone the **Share** button opens the OS share sheet - Messages, WhatsApp,
+Mail, anything installed - with the bill name and the link already filled in.
+The sheet needs a secure context, so over a plain-http LAN address the button
+copies instead and says so.
+
 **Which address the link uses.** By default it is built from whatever address
 you are browsing from, which is right when that is the address your guests use
 too. If you reach the app on a LAN address but your guests do not, set

@@ -4,8 +4,9 @@
 
 import { api } from '../api.js';
 import {
-  $, add, centsToInput, clear, confirmDialog, h, initials, money, moneyAbs,
-  debounce, mount, pctLabel, relTime, toast, today,
+  $, add, canShareNatively, centsToInput, clear, confirmDialog, copyText, h, initials,
+  money, moneyAbs, debounce, mount, pctLabel, relTime, shareIcon, shareOrCopy,
+  toast, today,
 } from '../util.js';
 import { go, state } from '../app.js';
 import { currencySymbol, promptDialog } from './groups.js';
@@ -875,7 +876,23 @@ async function mountSharePanel(box, billId, bill) {
             : null,
           h('button.btn.btn-primary', {
             type: 'button',
-            onclick: () => act(() => api.createShare(billId, { allow_join: true }), 'Link created.'),
+            // Copies as soon as the link exists: pressing this button means you
+            // are about to send it to someone, so having it already on the
+            // clipboard saves a second deliberate step.
+            onclick: async (event) => {
+              const button = event.currentTarget;
+              button.disabled = true;
+              try {
+                share = (await api.createShare(billId, { allow_join: true })).share;
+                const created = share.public_url || `${location.origin}${share.path}`;
+                const copied = await copyText(created);
+                draw();
+                toast(copied ? 'Link created and copied to your clipboard.' : 'Link created.', 'ok');
+              } catch (error) {
+                button.disabled = false;
+                toast(error.message, 'err');
+              }
+            },
           }, 'Create a share link')),
       ));
       stopPolling();
@@ -891,7 +908,58 @@ async function mountSharePanel(box, billId, bill) {
     const originDiffers = share.public_url
       && !share.public_url.startsWith(`${location.origin}/`);
 
-    const urlField = h('input', { type: 'text', value: url, readonly: true, onclick: (e) => e.target.select() });
+    // Clicking the field copies as well as selecting it - a click is a user
+    // gesture, so the clipboard write is allowed, and it saves reaching for
+    // the Copy button or Ctrl+C.
+    const urlField = h('input', {
+      type: 'text', value: url, readonly: true,
+      title: 'Click to copy',
+      onclick: async (event) => {
+        event.target.select();
+        if (await copyText(event.target.value)) toast('Link copied.');
+      },
+    });
+
+    // What actually gets handed to Messages/WhatsApp. The link goes in `url`
+    // rather than being glued into `text`, so targets that treat a URL
+    // specially (a preview, a tappable link) can do that - and the ones that
+    // do not simply append it, which reads fine either way.
+    const shareText = () => {
+      const name = (bill.title || '').trim();
+      return name
+        ? `Splitting "${name}" — tap to pick what you had:`
+        : 'Tap to pick what you had on this bill:';
+    };
+
+    const shareButton = h('button.btn.btn-primary', { type: 'button' },
+      shareIcon(), canShareNatively() ? 'Share' : 'Copy link');
+    shareButton.addEventListener('click', async () => {
+      // Copy *before* opening the sheet: awaiting navigator.share can outlive
+      // the user gesture, and iOS then refuses the clipboard write. Doing it
+      // first means the link is on the clipboard even if they back out of the
+      // sheet, or pick a target that does not paste it properly.
+      const copied = await copyText(urlField.value);
+
+      const result = await shareOrCopy({
+        title: bill.title ? `${bill.title} — Bill Splitter` : 'Bill Splitter',
+        text: shareText(),
+        url: urlField.value,          // whichever address is on screen
+      });
+
+      if (result === 'shared') return;          // the sheet is its own feedback
+      if (result === 'cancelled') {
+        if (copied) toast('Link copied to your clipboard.');
+        return;
+      }
+      if (result === 'copied' || copied) {
+        toast(canShareNatively() || window.isSecureContext
+          ? 'Link copied.'
+          : 'Link copied. The share sheet needs https, so it is not available here.');
+        return;
+      }
+      urlField.select();
+      toast('Could not copy automatically — the link is selected, press Ctrl+C.', 'err');
+    });
     const picked = share.people_who_picked;
     const total = share.people.length;
 
@@ -910,7 +978,7 @@ async function mountSharePanel(box, billId, bill) {
               onclick: async (event) => {
                 const button = event.currentTarget;
                 try {
-                  await navigator.clipboard.writeText(url);
+                  await navigator.clipboard.writeText(urlField.value);
                   button.textContent = 'Copied';
                   setTimeout(() => { button.textContent = 'Copy'; }, 1600);
                 } catch {
@@ -920,6 +988,11 @@ async function mountSharePanel(box, billId, bill) {
               },
             }, 'Copy')),
           h('span.hint', {}, 'Anyone with this link can pick and change items. Treat it like the receipt itself.')),
+
+        h('div.row', {}, shareButton,
+          h('span.small.faint', {}, canShareNatively()
+            ? 'Opens your phone’s share sheet — Messages, WhatsApp, anything.'
+            : 'Your browser has no share sheet here, so this copies the link.')),
 
         // Whether the link you are about to copy actually works for the people
         // you send it to is the one thing worth being loud about.

@@ -13,7 +13,7 @@ import { renderAccount } from './views/account.js';
 // server reports, so a browser holding a cached copy of the frontend from
 // before an update says so instead of silently looking like the update did
 // nothing. Kept in step with the VERSION file by a test.
-export const UI_VERSION = '1.3.0';
+export const UI_VERSION = '1.4.0';
 
 export const state = {
   user: null,

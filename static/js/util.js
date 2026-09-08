@@ -244,6 +244,71 @@ export function busy(button, fn) {
   };
 }
 
+/**
+ * Hand something to the OS share sheet, falling back to the clipboard.
+ *
+ * On a phone this is what puts Messages, WhatsApp and Mail in front of the
+ * person instead of making them copy a URL out of a text field. Returns what
+ * actually happened so the caller can say the right thing:
+ *   'shared'    the sheet took it
+ *   'cancelled' the sheet opened and they backed out - say nothing
+ *   'copied'    no sheet available, so the link is on the clipboard
+ *   'failed'    neither worked; the caller should tell them to select it
+ *
+ * navigator.share needs a secure context, so it is missing over plain http
+ * (a LAN address) even on a phone that supports it - hence the fallback
+ * mattering as much as the sheet.
+ */
+export async function shareOrCopy({ title, text, url }) {
+  if (navigator.share) {
+    try {
+      await navigator.share({ title, text, url });
+      return 'shared';
+    } catch (error) {
+      if (error && error.name === 'AbortError') return 'cancelled';
+      // Anything else (no target chosen, permission, an odd in-app browser)
+      // falls through to the clipboard rather than dead-ending.
+    }
+  }
+  try {
+    await navigator.clipboard.writeText(url);
+    return 'copied';
+  } catch {
+    return 'failed';
+  }
+}
+
+/** True when the OS share sheet is actually reachable from here. */
+export function canShareNatively() {
+  return Boolean(navigator.share);
+}
+
+/**
+ * Put text on the clipboard. Returns whether it worked.
+ *
+ * Only ever call this from a click handler: browsers require a user gesture
+ * (and a focused document) for a clipboard write, so doing it when a panel
+ * merely renders would be both blocked and rude.
+ */
+export async function copyText(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function shareIcon() {
+  return h('span', {
+    style: { display: 'inline-flex', width: '15px', height: '15px' },
+    html: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" '
+      + 'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+      + '<path d="M12 16V3M12 3 7 8M12 3l5 5"/>'
+      + '<path d="M4 14v5a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-5"/></svg>',
+  });
+}
+
 export function emptyState(icon, title, note, action) {
   return h('div.empty', {}, h('div.big', {}, icon), h('h3', {}, title),
     note && h('p.small', {}, note), action);
