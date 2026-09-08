@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "bill-splitter",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["-m", "app.main"],
+      "port": 9100
+    }
+  ]
+}

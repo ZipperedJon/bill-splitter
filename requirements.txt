@@ -1,0 +1,4 @@
+# Deliberately tiny: no native compiles, so `pip install` is fast on a Raspberry Pi.
+# Everything else (sqlite3, scrypt password hashing, GitHub API calls) is stdlib.
+fastapi==0.115.6
+uvicorn==0.34.0

@@ -1,0 +1,13 @@
+{
+  "name": "Bill Splitter",
+  "short_name": "Bills",
+  "description": "Split costs and bills with your group.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#16171b",
+  "theme_color": "#2f6df6",
+  "icons": [
+    { "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ]
+}

@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="auto">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<meta name="theme-color" content="#16171b">
+<title>Bill Splitter</title>
+<link rel="stylesheet" href="/css/styles.css">
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
+<link rel="manifest" href="/manifest.webmanifest">
+</head>
+<body>
+<div id="boot" class="boot"><div class="spinner" aria-hidden="true"></div></div>
+
+<header id="topbar" class="topbar" hidden>
+  <a class="brand" href="#/">
+    <svg viewBox="0 0 24 24" aria-hidden="true" class="brand-mark">
+      <path d="M4 7h16M4 12h16M4 17h9" stroke="currentColor" stroke-width="2" stroke-linecap="round" fill="none"/>
+    </svg>
+    <span>Bill Splitter</span>
+  </a>
+  <nav id="nav" class="nav" aria-label="Main"></nav>
+  <div class="topbar-right">
+    <button id="theme-toggle" class="icon-btn" type="button" title="Switch theme" aria-label="Switch theme"></button>
+    <div class="menu" id="user-menu"></div>
+  </div>
+</header>
+
+<main id="view" class="view" tabindex="-1"></main>
+
+<footer id="footer" class="footer" hidden></footer>
+
+<div id="toasts" class="toasts" aria-live="polite" aria-atomic="false"></div>
+<div id="modal-root"></div>
+
+<script type="module" src="/js/app.js"></script>
+</body>
+</html>

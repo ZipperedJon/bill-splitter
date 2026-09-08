@@ -1,0 +1,18 @@
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+.env
+data/
+*.db
+*.db-wal
+*.db-shm
+*.sqlite3
+backups/
+.update-state.json
+.DS_Store
+.pytest_cache/
+
+# Per-machine Claude Code state (.claude/launch.json is shared on purpose)
+.claude/settings.local.json
