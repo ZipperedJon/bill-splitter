@@ -85,6 +85,27 @@ if [ "${1:-}" = "--doctor" ]; then
   printf '  %-22s %s\n' "service state" "$(systemctl is-active "$SERVICE" 2>/dev/null || echo 'not installed')"
   printf '  %-22s %s\n' "answering on :$PORT" \
     "$(curl -fsS --max-time 3 "http://127.0.0.1:$PORT/api/health" 2>/dev/null || echo 'no response')"
+
+  # Who is actually connecting. Guessing the address of a reverse proxy or
+  # tunnel is the easy way to get BILLSPLIT_TRUSTED_PROXIES wrong, so read it
+  # off the access log rather than off the network diagram.
+  TRUSTED="$(grep -E '^BILLSPLIT_TRUSTED_PROXIES=' "$SELF_DIR/.env" 2>/dev/null | cut -d= -f2-)"
+  printf '  %-22s %s\n' "trusted proxies" "${TRUSTED:-127.0.0.1,::1 (default, not set in .env)}"
+
+  PEERS="$(journalctl -u "$SERVICE" -n 800 --no-pager 2>/dev/null \
+    | grep -oE '[0-9]{1,3}(\.[0-9]{1,3}){3}:[0-9]+ - "' \
+    | cut -d: -f1 | sort | uniq -c | sort -rn | head -4 \
+    | awk '{printf "%s (%s reqs) ", $2, $1}')"
+  printf '  %-22s %s\n' "connections from" "${PEERS:-(no access log readable - try with sudo)}"
+  if [ -n "$PEERS" ] && [ -n "$TRUSTED" ]; then
+    for peer in $(printf '%s\n' "$PEERS" | grep -oE '^[0-9.]+|[[:space:]][0-9.]+' | tr -d ' '); do
+      case ",$TRUSTED," in
+        *",$peer,"*) ;;
+        *) [ "$peer" = "127.0.0.1" ] || warn \
+             "$peer is connecting but is not in BILLSPLIT_TRUSTED_PROXIES - its X-Forwarded-For is ignored." ;;
+      esac
+    done
+  fi
   printf '\n  %s\n\n' "${DIM}If the served version and the commit above disagree, restart the service.${OFF}"
   exit 0
 fi

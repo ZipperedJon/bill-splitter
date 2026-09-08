@@ -402,14 +402,25 @@ BILLSPLIT_TRUSTED_PROXIES=192.168.10.42
 ```
 
 A subnet works too (`192.168.10.0/24`), at the cost of trusting anything on your
-LAN to state its own client IP. To find the address, look at whose requests are
-arriving:
+LAN to state its own client IP - a fair trade on a home network, and it saves
+guessing the address.
+
+Don't guess it from your network diagram; read it off the access log. `--doctor`
+prints who is actually connecting and warns when one of them is not trusted:
 
 ```bash
-sudo journalctl -u bill-splitter -n 200 | grep -oE '^INFO: +[0-9.]+' | sort -u
+sudo ./install.sh --doctor
 ```
 
-Restart after editing `.env` (`sudo systemctl restart bill-splitter`).
+Restart after editing `.env` (`sudo systemctl restart bill-splitter`), then
+check from a device that is *not* the Pi:
+
+```bash
+curl -s https://your-domain/api/health     # client_ip should be your public IP
+```
+
+This only affects how finely sign-in rate limiting buckets visitors. Nothing
+breaks if you leave it alone, so it is not worth moving your proxy around for.
 
 **If you put Cloudflare Access in front, it will block your share links.** If the whole hostname sits
 behind an Access policy, anyone opening `/s/<token>` gets an Access login screen
