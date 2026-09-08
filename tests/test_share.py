@@ -271,6 +271,126 @@ def test_cannot_claim_for_someone_not_on_the_bill_or_a_foreign_item():
     assert "not on this bill" in r.json()["detail"]
 
 
+# --- sub-items and divided items through a link ------------------------------
+
+def mixed_bill(client: TestClient):
+    """A burger with extras, and a round of three beers on one line."""
+    me = client.get("/api/me").json()["user"]
+    jon = f"u:{me['id']}"
+    group_id = client.post(
+        "/api/groups", json={"name": "Pub", "guest_names": ["Dana"]}
+    ).json()["group"]["id"]
+    dana = next(
+        p["party"] for p in client.get(f"/api/groups/{group_id}").json()["parties"]
+        if p["name"] == "Dana"
+    )
+    detail = client.post(
+        f"/api/groups/{group_id}/bills",
+        json={
+            "title": "Pub night", "split_mode": "itemized",
+            "items": [
+                {"label": "Burger", "amount": "12.00", "sub_items": [
+                    {"label": "Add bacon", "amount": "2.00"},
+                    {"label": "No onions", "amount": "0"},
+                ]},
+                {"label": "Beer", "amount": "18.00", "portions": 3},
+            ],
+            "participants": [{"party": jon}, {"party": dana}],
+        },
+    ).json()
+    ids = {i["label"]: i["id"] for i in detail["items"]}
+    return {"group_id": group_id, "bill_id": detail["bill_id"], "ids": ids,
+            "jon": jon, "dana": dana}
+
+
+def test_the_share_page_nests_sub_items_and_prices_the_whole_line():
+    client = fresh_client()
+    bill = mixed_bill(client)
+    token = make_link(client, bill["bill_id"])
+
+    data = guest().get(f"/api/share/{token}").json()
+    assert [i["label"] for i in data["items"]] == ["Burger", "Beer"], \
+        "sub-items must not appear as their own tappable lines"
+
+    burger = data["items"][0]
+    assert [s["label"] for s in burger["sub_items"]] == ["Add bacon", "No onions"]
+    assert burger["amount_cents"] == 1200
+    assert burger["line_total_cents"] == 1400, "what you take on by ticking it"
+    assert data["items"][1]["portions"] == 3
+
+
+def test_claiming_a_parent_through_the_link_picks_up_its_sub_items():
+    client = fresh_client()
+    bill = mixed_bill(client)
+    token = make_link(client, bill["bill_id"])
+
+    r = guest().post(
+        f"/api/share/{token}/claims",
+        json={"party": bill["dana"], "item_ids": [bill["ids"]["Burger"]]},
+    )
+    assert r.status_code == 200, r.text
+
+    detail = client.get(f"/api/bills/{bill['bill_id']}").json()
+    lines = {b["name"]: b for b in detail["breakdown"]}
+    # Burger + bacon land on Dana; the unclaimed beer line splits evenly.
+    assert lines["Dana"]["base_cents"] == 1400 + 900
+    assert sum(b["owed_cents"] for b in detail["breakdown"]) == detail["totals"]["total_cents"]
+
+
+def test_a_guest_takes_some_portions_of_a_divided_line():
+    client = fresh_client()
+    bill = mixed_bill(client)
+    token = make_link(client, bill["bill_id"])
+    visitor = guest()
+    beer = str(bill["ids"]["Beer"])
+
+    visitor.post(f"/api/share/{token}/claims",
+                 json={"party": bill["dana"], "portions": {beer: 2}})
+    r = visitor.post(f"/api/share/{token}/claims",
+                     json={"party": bill["jon"], "portions": {beer: 1}})
+    assert r.status_code == 200, r.text
+
+    data = r.json()
+    beer_line = next(i for i in data["items"] if i["label"] == "Beer")
+    assert beer_line["claims"] == {bill["dana"]: 2, bill["jon"]: 1}
+
+    detail = client.get(f"/api/bills/{bill['bill_id']}").json()
+    lines = {b["name"]: b for b in detail["breakdown"]}
+    # Two of three beers plus half the unclaimed burger line.
+    assert lines["Dana"]["base_cents"] == 1200 + 700
+    assert lines["jon"]["base_cents"] == 600 + 700
+
+
+def test_a_guest_cannot_take_more_portions_than_the_line_has():
+    client = fresh_client()
+    bill = mixed_bill(client)
+    token = make_link(client, bill["bill_id"])
+    r = guest().post(
+        f"/api/share/{token}/claims",
+        json={"party": bill["dana"], "portions": {str(bill["ids"]["Beer"]): 9}},
+    )
+    assert r.status_code == 400
+    assert "more than the 3 portions" in r.json()["detail"]
+
+
+def test_a_guest_cannot_claim_a_sub_item_directly():
+    """Modifications belong to their dish; they are not separately claimable."""
+    client = fresh_client()
+    bill = mixed_bill(client)
+    token = make_link(client, bill["bill_id"])
+
+    with db.cursor() as conn:
+        bacon_id = conn.execute(
+            "SELECT id FROM bill_items WHERE bill_id=? AND label='Add bacon'",
+            (bill["bill_id"],),
+        ).fetchone()["id"]
+
+    r = guest().post(f"/api/share/{token}/claims",
+                     json={"party": bill["dana"], "item_ids": [bacon_id]})
+    assert r.status_code == 400
+    assert "extras that come with another item" in r.json()["detail"]
+
+
 # --- joining -----------------------------------------------------------------
 
 def test_a_newcomer_adds_their_own_name_and_picks():

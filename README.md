@@ -55,7 +55,23 @@ on subtotal-plus-tax. There are quick 15/18/20/22/25% buttons.
 
 **Other charges.** Delivery fees, resort fees, service charges, cleaning fees,
 corkage — any number of them, each as a percentage or a flat amount, and each
-split either evenly or in proportion to what people ordered. Discounts too.
+split either evenly or in proportion to what people ordered.
+
+**Discounts, for everyone or for one person.** A group rate comes off the whole
+bill; somebody's coupon or comped dish comes off *their* share alone, so the
+rest of the table does not quietly pay for it. When it is aimed at one person a
+percentage means a percentage of their share, and their tax and tip drop with
+it. It is capped at their share, so nobody ends up owing less than nothing.
+
+**Divide a line into portions.** One line for three beers or eight slices of
+pizza: set how many portions it holds and each person takes however many they
+had. The split follows the portions taken, so two beers and one beer is a 2:1
+split of that line rather than a 50/50 one.
+
+**Sub-items for modifications.** Hang extras off a line — add bacon, oat milk,
+no onions, extra cheese. A sub-item is never claimed on its own: its cost
+follows whoever took the parent, so ticking the burger picks up its bacon
+automatically. That holds on the share page too.
 
 **Categories.** Food & Restaurant, Groceries, Airbnb / Hotel, Transport, Flights,
 Activities, Drinks, Utilities, Rent, Shopping, Household, Other — and you can
@@ -120,7 +136,9 @@ What the person opening it gets, in three taps:
    added as a guest.
 2. **What did you have?** — the receipt, one line per item. Tapping an item
    claims it; an item claimed by several people is split between them and says
-   who it is shared with.
+   who it is shared with. A divided line gets a −/+ stepper instead ("2 of the
+   4 glasses"), and a line's modifications are listed under it so you can see
+   that ticking the burger includes its bacon.
 3. **You owe $X** — their share of the items they picked plus their share of
    tax, tip and fees, and what everyone else owes.
 
@@ -230,6 +248,18 @@ install.sh       the one-script installer
   several people claiming at once do not clobber one another. The owner's editor
   is the one place that replaces wholesale, and that is what the revision check
   protects.
+- **A sub-item holds no claims of its own.** Its cost resolves to whoever
+  claimed its parent, in the split engine. Making that a property of the
+  calculation rather than something the UI mirrors means the two can never drift
+  apart, and neither the editor nor the share page has to remember the rule.
+- **Divided lines reuse the existing weighted split.** "Portions taken" is just
+  the claim's weight, so three beers split 2:1 goes through exactly the same
+  largest-remainder code as everything else, with no second money path to keep
+  correct.
+- **Rebuilding the editor form preserves scroll and moves focus deliberately.**
+  Adding an item puts the cursor in its name field; flipping tax to a percentage
+  puts it in the percentage box. A naive re-render throws you back to the top of
+  the page, which is miserable on a phone at a restaurant table.
 
 ## Tests
 

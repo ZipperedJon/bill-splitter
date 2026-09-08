@@ -63,9 +63,31 @@ CREATE TABLE bills (
 )
 """
 
+# bill_items at v1: no parent_id (sub-items) and no portions.
+V1_ITEMS = """
+CREATE TABLE bill_items (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    bill_id      INTEGER NOT NULL REFERENCES bills(id) ON DELETE CASCADE,
+    label        TEXT NOT NULL DEFAULT '',
+    amount_cents INTEGER NOT NULL DEFAULT 0,
+    sort_order   INTEGER NOT NULL DEFAULT 0
+)
+"""
+
+# Everything schema v1 did not have, which the upgrade has to put in place.
+ADDED_SINCE_V1 = {
+    "bills": {"revision", "discount_target"},
+    "bill_items": {"parent_id", "portions"},
+}
+
 
 def make_v1_database() -> None:
-    """A database as it looked at schema v1: no bill_shares, no bills.revision."""
+    """A database as it looked at schema v1.
+
+    Rebuilt from hand-written v1 table definitions rather than by tweaking the
+    current ones, so the test keeps testing the real upgrade as the schema moves
+    on rather than quietly checking nothing.
+    """
     wipe()
     db.init_db()
     with db.cursor() as conn:
@@ -74,6 +96,9 @@ def make_v1_database() -> None:
         conn.execute("DROP TABLE bills")
         conn.execute(V1_BILLS)
         conn.execute("CREATE INDEX idx_bills_group ON bills(group_id, bill_date DESC)")
+        conn.execute("DROP TABLE bill_items")
+        conn.execute(V1_ITEMS)
+        conn.execute("CREATE INDEX idx_items_bill ON bill_items(bill_id, sort_order)")
         conn.execute("UPDATE meta SET value='1' WHERE key='schema_version'")
 
         # Real data, so we can prove the upgrade does not lose any of it.
@@ -93,6 +118,10 @@ def make_v1_database() -> None:
                VALUES (1,'Old dinner','2026-01-01','USD','even',5000,1,1,1)"""
         )
         conn.execute("INSERT INTO bill_participants(bill_id, party, weight) VALUES (1,'u:1',1)")
+        conn.execute(
+            """INSERT INTO bill_items(bill_id, label, amount_cents, sort_order)
+               VALUES (1,'Old salad',5000,0)"""
+        )
 
 
 def version() -> int:
@@ -116,19 +145,27 @@ def test_a_v1_database_upgrades_and_keeps_its_data():
     make_v1_database()
     assert version() == 1
     assert "bill_shares" not in tables()
-    assert "revision" not in columns("bills")
+    for table, added in ADDED_SINCE_V1.items():
+        assert not (added & columns(table)), f"{table} should start without {added}"
 
     db.init_db()  # what the updater calls after pulling new code
 
     assert version() == db.SCHEMA_VERSION
     assert "bill_shares" in tables(), "the new table should have been created"
-    assert "revision" in columns("bills"), "the new column should have been added"
+    for table, added in ADDED_SINCE_V1.items():
+        missing = added - columns(table)
+        assert not missing, f"{table} is still missing {missing}"
 
     with db.cursor() as conn:
         bill = conn.execute("SELECT * FROM bills WHERE id=1").fetchone()
         assert bill["title"] == "Old dinner"
         assert bill["subtotal_cents"] == 5000
         assert bill["revision"] == 0, "existing rows start at revision 0"
+        assert bill["discount_target"] == "all", "old bills discount everyone, as before"
+        item = conn.execute("SELECT * FROM bill_items WHERE id=1").fetchone()
+        assert item["label"] == "Old salad"
+        assert item["portions"] == 1, "an old item is one undivided portion"
+        assert item["parent_id"] is None
         assert conn.execute("SELECT COUNT(*) AS n FROM users").fetchone()["n"] == 1
         assert conn.execute(
             "SELECT COUNT(*) AS n FROM bill_participants"
@@ -190,7 +227,10 @@ def test_a_fresh_database_starts_at_the_current_version():
     db.init_db()
     assert version() == db.SCHEMA_VERSION
     assert "bill_shares" in tables()
-    assert "revision" in columns("bills")
+    # A brand new database must end up with the same shape as an upgraded one.
+    for table, added in ADDED_SINCE_V1.items():
+        missing = added - columns(table)
+        assert not missing, f"fresh {table} is missing {missing}"
 
 
 if __name__ == "__main__":

@@ -66,23 +66,43 @@ export async function renderBillEditor({ groupId, billId }) {
   const bodyBox = h('div.stack');
   const fx = {
     preview: () => runPreview(),
-    rerender: () => { redrawBody(); runPreview(); },
+    rerender: (focusKey) => { redrawBody(focusKey); runPreview(); },
   };
 
   const shareBox = h('div.stack');
 
-  const redrawBody = () => {
+  // Rebuilding the form throws away the DOM, which drops the scroll position
+  // and whatever had focus. Both are restored here so adding a row or flipping
+  // tax to a percentage does not fling you back to the top of the page.
+  // `focusKey` names the input that should end up focused - the label of the
+  // item you just added, the amount field you just revealed - matched against
+  // the data-focus attributes the cards set.
+  const redrawBody = (focusKey) => {
+    const scrollY = window.scrollY;
     mount(bodyBox,
       detailsCard(bill, categories, group, fx),
       peopleCard(bill, parties, fx),
       bill.split_mode === 'itemized'
         ? itemsCard(bill, parties, symbol, fx)
         : subtotalCard(bill, symbol, fx),
-      chargesCard(bill, symbol, fx),
+      chargesCard(bill, parties, symbol, fx),
       extrasCard(bill, symbol, fx),
       paidCard(bill, parties, symbol, currency, fx),
       billId ? shareBox : newBillShareHint(),
     );
+    window.scrollTo({ top: scrollY, behavior: 'instant' });
+
+    if (!focusKey) return;
+    const target = bodyBox.querySelector(`[data-focus="${focusKey}"]`);
+    if (!target) return;
+    target.focus({ preventScroll: true });
+    if (target.select) target.select();
+    // Only nudge the page if the new field is actually out of view - a plain
+    // focus() would have yanked it to the middle of the screen.
+    const box = target.getBoundingClientRect();
+    if (box.top < 70 || box.bottom > window.innerHeight - 20) {
+      target.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    }
   };
   redrawBody();
   runPreview();
@@ -169,7 +189,7 @@ function blankBill(group, parties) {
     currency: group.currency || state.defaults.currency || 'USD',
     split_mode: 'even',
     subtotal: '',
-    discount: { mode: 'none', percent: 0, amount: '' },
+    discount: { mode: 'none', percent: 0, amount: '', target: 'all' },
     tax: { mode: 'none', percent: Number(state.defaults.tax_percent) || 0, amount: '' },
     tip: {
       mode: 'none',
@@ -194,7 +214,12 @@ function fromApi(detail) {
     currency: b.currency,
     split_mode: b.split_mode,
     subtotal: b.subtotal_cents ? centsToInput(b.subtotal_cents) : '',
-    discount: { mode: b.discount_mode, percent: b.discount_percent, amount: b.discount_cents ? centsToInput(b.discount_cents) : '' },
+    discount: {
+      mode: b.discount_mode,
+      percent: b.discount_percent,
+      amount: b.discount_cents ? centsToInput(b.discount_cents) : '',
+      target: b.discount_target || 'all',
+    },
     tax: { mode: b.tax_mode, percent: b.tax_percent, amount: b.tax_cents ? centsToInput(b.tax_cents) : '' },
     tip: { mode: b.tip_mode, percent: b.tip_percent, amount: b.tip_cents ? centsToInput(b.tip_cents) : '', base: b.tip_base },
     extras: detail.extras.map((e) => ({
@@ -204,7 +229,12 @@ function fromApi(detail) {
     items: detail.items.map((i) => ({
       label: i.label,
       amount: i.amount_cents ? centsToInput(i.amount_cents) : '',
+      portions: i.portions || 1,
       shares: { ...i.shares },
+      sub_items: (i.sub_items || []).map((s) => ({
+        label: s.label,
+        amount: s.amount_cents ? centsToInput(s.amount_cents) : '',
+      })),
     })),
     participants: detail.participants.map((p) => ({ party: p.party, weight: p.weight })),
     payments: detail.payments.map((p) => ({ party: p.party, amount: centsToInput(p.amount_cents) })),
@@ -227,7 +257,15 @@ function toApi(bill) {
       label: e.label, mode: e.mode, percent: Number(e.percent) || 0,
       amount: e.amount || 0, split: e.split,
     })),
-    items: bill.items.map((i) => ({ label: i.label, amount: i.amount || 0, shares: i.shares })),
+    items: bill.items.map((i) => ({
+      label: i.label,
+      amount: i.amount || 0,
+      portions: Math.max(1, Number(i.portions) || 1),
+      shares: i.shares,
+      sub_items: (i.sub_items || [])
+        .filter((s) => (s.label || '').trim() || Number(s.amount))
+        .map((s) => ({ label: s.label, amount: s.amount || 0 })),
+    })),
     participants: bill.participants.map((p) => ({ party: p.party, weight: Number(p.weight) || 0 })),
     payments: bill.payments.filter((p) => p.amount !== '' && Number(p.amount) !== 0)
       .map((p) => ({ party: p.party, amount: p.amount })),
@@ -235,7 +273,9 @@ function toApi(bill) {
 }
 
 function charge(value) {
-  return { mode: value.mode, percent: Number(value.percent) || 0, amount: value.amount || 0 };
+  const out = { mode: value.mode, percent: Number(value.percent) || 0, amount: value.amount || 0 };
+  if (value.target) out.target = value.target;
+  return out;
 }
 
 // --- cards -------------------------------------------------------------------
@@ -292,7 +332,7 @@ function detailsCard(bill, categories, group, fx) {
             onclick: () => {
               bill.split_mode = key;
               if (key === 'itemized' && !bill.items.length) {
-                bill.items = [{ label: '', amount: '', shares: {} }];
+                bill.items = [newItem()];
               }
               fx.rerender();
             },
@@ -317,6 +357,9 @@ function peopleCard(bill, parties, fx) {
               bill.participants = bill.participants.filter((p) => p.party !== person.party);
               bill.payments = bill.payments.filter((p) => p.party !== person.party);
               for (const item of bill.items) delete item.shares[person.party];
+              // A discount aimed at someone no longer on the bill would be
+              // rejected on save, so put it back to everyone.
+              if (bill.discount.target === person.party) bill.discount.target = 'all';
             } else {
               bill.participants.push({ party: person.party, weight: 1 });
             }
@@ -371,44 +414,161 @@ function subtotalCard(bill, symbol, fx) {
   );
 }
 
+function newItem() {
+  return { label: '', amount: '', portions: 1, shares: {}, sub_items: [] };
+}
+
 function itemsCard(bill, parties, symbol, fx) {
   const rows = bill.items.map((item, index) => {
-    const shareChips = bill.participants.map((participant) => {
+    const portions = Math.max(1, Number(item.portions) || 1);
+    const divided = portions > 1;
+
+    // Whole line: a chip toggles you on or off. Divided line: a stepper, since
+    // "how many of the three beers" is the actual question.
+    const shareControls = bill.participants.map((participant) => {
       const person = parties.find((p) => p.party === participant.party) || { name: '?' };
-      const on = Number(item.shares[participant.party] || 0) > 0;
-      return h('button.chip.btn-sm', {
-        type: 'button', 'aria-pressed': on ? 'true' : 'false',
-        onclick: () => {
-          if (on) delete item.shares[participant.party];
-          else item.shares[participant.party] = 1;
-          fx.rerender();
-        },
-      }, person.name);
+      const taken = Number(item.shares[participant.party] || 0);
+
+      if (!divided) {
+        return h('button.chip.btn-sm', {
+          type: 'button', 'aria-pressed': taken > 0 ? 'true' : 'false',
+          onclick: () => {
+            if (taken > 0) delete item.shares[participant.party];
+            else item.shares[participant.party] = 1;
+            fx.rerender();
+          },
+        }, person.name);
+      }
+
+      const setTaken = (next) => {
+        const clamped = Math.max(0, Math.min(portions, next));
+        if (clamped === 0) delete item.shares[participant.party];
+        else item.shares[participant.party] = clamped;
+        fx.rerender();
+      };
+      return h('span.portion-pick', { class: taken > 0 ? 'on' : '' },
+        h('button.icon-btn.btn-sm', {
+          type: 'button', 'aria-label': `One fewer for ${person.name}`,
+          disabled: taken <= 0, onclick: () => setTaken(taken - 1),
+        }, '−'),
+        h('span.portion-name', {}, person.name),
+        h('span.portion-count', {}, String(taken)),
+        h('button.icon-btn.btn-sm', {
+          type: 'button', 'aria-label': `One more for ${person.name}`,
+          disabled: taken >= portions, onclick: () => setTaken(taken + 1),
+        }, '+'),
+      );
     });
 
-    const assigned = Object.keys(item.shares).length;
+    const claimed = Object.values(item.shares).reduce((sum, n) => sum + (Number(n) || 0), 0);
+    const subTotal = item.sub_items.reduce((sum, s) => sum + (Number(s.amount) || 0), 0);
 
-    return h('div.item-row', {},
+    const subRows = item.sub_items.map((sub, subIndex) => h('div.sub-row', {},
+      h('span.sub-tick', {}, '↳'),
       h('input', {
-        type: 'text', value: item.label, placeholder: `Item ${index + 1}`, maxlength: 120,
-        oninput: (event) => { item.label = event.target.value; },
+        type: 'text', value: sub.label, placeholder: 'Add bacon, oat milk, no onions…',
+        maxlength: 120, dataset: { focus: `sub-label-${index}-${subIndex}` },
+        oninput: (event) => { sub.label = event.target.value; },
       }),
       h('div.money-input', {}, h('span.cur', {}, symbol),
         h('input', {
-          type: 'text', inputmode: 'decimal', value: item.amount, placeholder: '0.00',
-          oninput: (event) => { item.amount = event.target.value; fx.preview(); },
+          type: 'text', inputmode: 'decimal', value: sub.amount, placeholder: '0.00',
+          dataset: { focus: `sub-amount-${index}-${subIndex}` },
+          oninput: (event) => { sub.amount = event.target.value; fx.preview(); },
         })),
       h('button.icon-btn', {
-        type: 'button', title: 'Remove item',
-        onclick: () => { bill.items.splice(index, 1); fx.rerender(); },
+        type: 'button', title: 'Remove this extra',
+        onclick: () => { item.sub_items.splice(subIndex, 1); fx.rerender(); },
       }, '×'),
-      h('div.who', {},
-        h('span.label-inline', {}, assigned ? 'Split between:' : 'Nobody picked — splits evenly:'),
-        ...shareChips),
+    ));
+
+    return h('div.item-block', {},
+      h('div.item-row', {},
+        h('input', {
+          type: 'text', value: item.label, placeholder: `Item ${index + 1}`, maxlength: 120,
+          dataset: { focus: `item-label-${index}` },
+          oninput: (event) => { item.label = event.target.value; },
+        }),
+        h('div.money-input', {}, h('span.cur', {}, symbol),
+          h('input', {
+            type: 'text', inputmode: 'decimal', value: item.amount, placeholder: '0.00',
+            dataset: { focus: `item-amount-${index}` },
+            oninput: (event) => { item.amount = event.target.value; fx.preview(); },
+          })),
+        h('button.icon-btn', {
+          type: 'button', title: 'Remove item',
+          onclick: () => { bill.items.splice(index, 1); fx.rerender(); },
+        }, '×'),
+
+        h('div.who', {},
+          h('span.label-inline', {},
+            divided
+              ? `Portions taken (${claimed} of ${portions}):`
+              : claimed ? 'Split between:' : 'Nobody picked — splits evenly:'),
+          ...shareControls),
+      ),
+
+      subRows.length
+        ? h('div.sub-list', {},
+            ...subRows,
+            h('div.sub-foot', {},
+              h('span.tiny.faint', {},
+                `Extras come with this item — whoever takes it pays for them too`
+                + (subTotal ? ` (+${symbol}${subTotal.toFixed(2)})` : ''))))
+        : null,
+
+      h('div.row.item-actions', {},
+        h('button.btn.btn-sm.btn-ghost', {
+          type: 'button',
+          onclick: () => {
+            item.sub_items.push({ label: '', amount: '' });
+            fx.rerender(`sub-label-${index}-${item.sub_items.length - 1}`);
+          },
+        }, '+ Extra / modification'),
+
+        divided
+          ? h('div.row-tight', {},
+              h('span.tiny.faint', {}, 'Divided into'),
+              h('input.portion-input', {
+                type: 'number', min: '1', max: '99', value: String(portions),
+                dataset: { focus: `item-portions-${index}` },
+                oninput: (event) => {
+                  const next = Math.max(1, Math.min(99, Number(event.target.value) || 1));
+                  item.portions = next;
+                  // Nobody can hold more portions than exist any more.
+                  for (const key of Object.keys(item.shares)) {
+                    item.shares[key] = Math.min(item.shares[key], next);
+                  }
+                  fx.preview();
+                },
+                onchange: () => fx.rerender(`item-portions-${index}`),
+              }),
+              h('span.tiny.faint', {}, 'portions'),
+              h('button.btn.btn-sm.btn-ghost', {
+                type: 'button',
+                onclick: () => {
+                  item.portions = 1;
+                  for (const key of Object.keys(item.shares)) item.shares[key] = 1;
+                  fx.rerender();
+                },
+              }, 'Undo divide'))
+          : h('button.btn.btn-sm.btn-ghost', {
+              type: 'button',
+              title: 'Split this one line into parts people can claim separately',
+              onclick: () => {
+                item.portions = Math.max(2, bill.participants.length || 2);
+                fx.rerender(`item-portions-${index}`);
+              },
+            }, '÷ Divide into portions'),
+      ),
     );
   });
 
-  const itemsTotal = bill.items.reduce((sum, item) => sum + (Number(item.amount) || 0), 0);
+  const itemsTotal = bill.items.reduce(
+    (sum, item) => sum + (Number(item.amount) || 0)
+      + item.sub_items.reduce((s, sub) => s + (Number(sub.amount) || 0), 0),
+    0,
+  );
 
   return h('div.card', {},
     h('div.card-head', {}, h('h3', {}, 'Items'),
@@ -418,18 +578,25 @@ function itemsCard(bill, parties, symbol, fx) {
       h('div.row', { style: { marginTop: '12px' } },
         h('button.btn.btn-sm', {
           type: 'button',
-          onclick: () => { bill.items.push({ label: '', amount: '', shares: {} }); fx.rerender(); },
+          onclick: () => {
+            bill.items.push(newItem());
+            // Land the cursor in the new row's name field rather than making
+            // people hunt for it after the list reflows.
+            fx.rerender(`item-label-${bill.items.length - 1}`);
+          },
         }, '+ Add item'),
         h('span.small.faint', {}, 'Tax and tip get split in proportion to what each person ordered.')),
     ),
   );
 }
 
-function chargeRow({ label, hint, value, symbol, fx, extraControls }) {
+function chargeRow({ key, label, hint, value, symbol, fx, extraControls }) {
+  const focusKey = `charge-${key}`;
   const control = value.mode === 'percent'
     ? h('div.pct-input', {},
         h('input', {
           type: 'number', min: '0', step: '0.001', value: String(value.percent ?? ''), placeholder: '0',
+          dataset: { focus: focusKey },
           oninput: (event) => { value.percent = event.target.value; fx.preview(); },
         }),
         h('span.sym', {}, '%'))
@@ -438,6 +605,7 @@ function chargeRow({ label, hint, value, symbol, fx, extraControls }) {
           h('span.cur', {}, symbol),
           h('input', {
             type: 'text', inputmode: 'decimal', value: value.amount, placeholder: '0.00',
+            dataset: { focus: focusKey },
             oninput: (event) => { value.amount = event.target.value; fx.preview(); },
           }))
       : h('div.small.faint', { style: { paddingTop: '9px' } }, 'Not applied');
@@ -449,7 +617,9 @@ function chargeRow({ label, hint, value, symbol, fx, extraControls }) {
       h('div.seg', {}, ...[['none', 'Off'], ['percent', '%'], ['amount', symbol]].map(([mode, text]) =>
         h('button', {
           type: 'button', 'aria-pressed': value.mode === mode ? 'true' : 'false',
-          onclick: () => { value.mode = mode; fx.rerender(); },
+          // Switching mode swaps which input is on screen, so put the cursor in
+          // it - you flipped to "%" because you were about to type a number.
+          onclick: () => { value.mode = mode; fx.rerender(mode === 'none' ? null : focusKey); },
         }, text))),
     ),
     extraControls,
@@ -457,20 +627,40 @@ function chargeRow({ label, hint, value, symbol, fx, extraControls }) {
   );
 }
 
-function chargesCard(bill, symbol, fx) {
+function chargesCard(bill, parties, symbol, fx) {
+  const onBill = bill.participants
+    .map((p) => parties.find((x) => x.party === p.party))
+    .filter(Boolean);
+  const targetName = (onBill.find((p) => p.party === bill.discount.target) || {}).name;
+
   return h('div.card', {},
     h('div.card-head', {}, h('h3', {}, 'Tax, tip and discount')),
     h('div.card-body.stack', {},
       chargeRow({
-        label: 'Discount', value: bill.discount, symbol, fx,
-        hint: 'Taken off the subtotal before tax. A coupon, a comped item, a group rate.',
+        key: 'discount', label: 'Discount', value: bill.discount, symbol, fx,
+        hint: bill.discount.target === 'all'
+          ? 'Taken off the subtotal before tax, shared by everyone in proportion to their share.'
+          : `Comes off ${targetName || 'that person'}'s share only`
+            + (bill.discount.mode === 'percent' ? ' — the percentage is of their share.' : '.'),
+        extraControls: bill.discount.mode === 'none' ? null
+          : h('div.row-tight', { style: { marginTop: '6px' } },
+              h('span.small.faint', {}, 'Applies to:'),
+              h('select', {
+                style: { maxWidth: '220px' },
+                onchange: (event) => { bill.discount.target = event.target.value; fx.rerender(); },
+              },
+                h('option', { value: 'all', selected: bill.discount.target === 'all' },
+                  'Everyone'),
+                ...onBill.map((person) => h('option', {
+                  value: person.party, selected: bill.discount.target === person.party,
+                }, `${person.name} only`)))),
       }),
       chargeRow({
-        label: 'Tax', value: bill.tax, symbol, fx,
+        key: 'tax', label: 'Tax', value: bill.tax, symbol, fx,
         hint: 'Percentage, or type the exact amount printed on the receipt.',
       }),
       chargeRow({
-        label: 'Tip', value: bill.tip, symbol, fx,
+        key: 'tip', label: 'Tip', value: bill.tip, symbol, fx,
         hint: 'Split in proportion to each person\'s share, so it stays fair on an itemized bill.',
         extraControls: bill.tip.mode === 'percent' ? h('div.row-tight', { style: { marginTop: '6px' } },
           h('span.small.faint', {}, 'Percent of:'),
@@ -484,7 +674,7 @@ function chargesCard(bill, symbol, fx) {
         ...[15, 18, 20, 22, 25].map((pct) => h('button.chip.btn-sm', {
           type: 'button',
           'aria-pressed': bill.tip.mode === 'percent' && Number(bill.tip.percent) === pct ? 'true' : 'false',
-          onclick: () => { bill.tip.mode = 'percent'; bill.tip.percent = pct; fx.rerender(); },
+          onclick: () => { bill.tip.mode = 'percent'; bill.tip.percent = pct; fx.rerender('charge-tip'); },
         }, `${pct}%`))),
     ),
   );
@@ -502,23 +692,26 @@ function extrasCard(bill, symbol, fx) {
           h('input', {
             type: 'text', value: extra.label, placeholder: 'Delivery fee', maxlength: 60,
             style: { flex: '1 1 130px', minWidth: '110px' },
+            dataset: { focus: `extra-label-${index}` },
             oninput: (event) => { extra.label = event.target.value; },
           }),
           extra.mode === 'percent'
             ? h('div.pct-input', { style: { width: '96px' } },
                 h('input', {
                   type: 'number', min: '0', step: '0.01', value: String(extra.percent ?? ''),
+                  dataset: { focus: `extra-value-${index}` },
                   oninput: (event) => { extra.percent = event.target.value; fx.preview(); },
                 }), h('span.sym', {}, '%'))
             : h('div.money-input', { style: { width: '110px' } },
                 h('span.cur', {}, symbol),
                 h('input', {
                   type: 'text', inputmode: 'decimal', value: extra.amount, placeholder: '0.00',
+                  dataset: { focus: `extra-value-${index}` },
                   oninput: (event) => { extra.amount = event.target.value; fx.preview(); },
                 })),
           h('div.seg', {}, ...[['amount', symbol], ['percent', '%']].map(([mode, text]) => h('button', {
             type: 'button', 'aria-pressed': extra.mode === mode ? 'true' : 'false',
-            onclick: () => { extra.mode = mode; fx.rerender(); },
+            onclick: () => { extra.mode = mode; fx.rerender(`extra-value-${index}`); },
           }, text))),
           h('button.icon-btn', {
             type: 'button', title: 'Remove',
@@ -536,7 +729,7 @@ function extrasCard(bill, symbol, fx) {
           type: 'button',
           onclick: () => {
             bill.extras.push({ label: '', mode: 'amount', percent: 0, amount: '', split: 'even' });
-            fx.rerender();
+            fx.rerender(`extra-label-${bill.extras.length - 1}`);
           },
         }, '+ Add charge')),
     ),

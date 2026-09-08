@@ -29,6 +29,11 @@ class ChargeIn(BaseModel):
     amount: Any = 0            # dollars, as typed; converted to cents server-side
 
 
+class DiscountIn(ChargeIn):
+    # 'all' spreads it over everyone; a party key takes it off that person only.
+    target: str = "all"
+
+
 class TipIn(ChargeIn):
     base: str = "pre_tax"
 
@@ -41,10 +46,20 @@ class ExtraIn(BaseModel):
     split: str = "even"        # even | proportional
 
 
+class SubItemIn(BaseModel):
+    """A modification on another line. No `shares`: it follows its parent."""
+    label: str = Field(default="", max_length=120)
+    amount: Any = 0
+
+
 class ItemIn(BaseModel):
     label: str = Field(default="", max_length=120)
     amount: Any = 0
+    # Divide the line into individually claimable parts (3 beers, 8 slices).
+    portions: int = Field(default=1, ge=1, le=99)
+    # party -> how many portions that person took (1 for a plain whole item).
     shares: dict[str, float] = Field(default_factory=dict)
+    sub_items: list[SubItemIn] = Field(default_factory=list)
 
 
 class ParticipantIn(BaseModel):
@@ -65,7 +80,7 @@ class BillIn(BaseModel):
     currency: str = Field(default="", max_length=8)
     split_mode: str = "even"
     subtotal: Any = 0
-    discount: ChargeIn = Field(default_factory=ChargeIn)
+    discount: DiscountIn = Field(default_factory=DiscountIn)
     tax: ChargeIn = Field(default_factory=ChargeIn)
     tip: TipIn = Field(default_factory=TipIn)
     extras: list[ExtraIn] = Field(default_factory=list)
@@ -129,12 +144,25 @@ def _validate(payload: BillIn, parties: dict[str, dict[str, Any]]) -> None:
             status.HTTP_400_BAD_REQUEST, "At least one person needs a share above zero."
         )
 
+    if payload.discount.target != "all" and payload.discount.target not in seen:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "The discount is aimed at someone who is not on this bill.",
+        )
+
     for item in payload.items:
-        for key in item.shares:
+        for key, units in item.shares.items():
             if key not in seen:
                 raise HTTPException(
                     status.HTTP_400_BAD_REQUEST,
                     f"An item is assigned to {key}, who is not on this bill.",
+                )
+            if float(units or 0) > item.portions:
+                raise HTTPException(
+                    status.HTTP_400_BAD_REQUEST,
+                    f"Someone is down for more than the {item.portions} portion"
+                    f"{'s' if item.portions != 1 else ''} of "
+                    f"'{item.label or 'an item'}'.",
                 )
     for payment in payload.payments:
         if payment.party not in seen:
@@ -153,6 +181,7 @@ def _write_bill(
         """UPDATE bills SET title=?, category_id=?, notes=?, bill_date=?, currency=?,
                             split_mode=?, subtotal_cents=?,
                             discount_mode=?, discount_percent=?, discount_cents=?,
+                            discount_target=?,
                             tax_mode=?, tax_percent=?, tax_cents=?,
                             tip_mode=?, tip_percent=?, tip_cents=?, tip_base=?,
                             updated_at=?, revision=revision+1
@@ -168,6 +197,7 @@ def _write_bill(
             payload.discount.mode,
             _percent(payload.discount.percent, "Discount"),
             _money(payload.discount.amount, "Discount"),
+            payload.discount.target or "all",
             payload.tax.mode,
             _percent(payload.tax.percent, "Tax"),
             _money(payload.tax.amount, "Tax"),
@@ -191,18 +221,33 @@ def _write_bill(
             (bill_id, participant.party, participant.weight),
         )
 
-    for order, item in enumerate(payload.items):
+    order = 0
+    for item in payload.items:
         cur = conn.execute(
-            "INSERT INTO bill_items(bill_id, label, amount_cents, sort_order) VALUES (?,?,?,?)",
-            (bill_id, item.label.strip(), _money(item.amount, f"Item '{item.label}'"), order),
+            """INSERT INTO bill_items(bill_id, parent_id, label, amount_cents, portions, sort_order)
+               VALUES (?, NULL, ?, ?, ?, ?)""",
+            (bill_id, item.label.strip(), _money(item.amount, f"Item '{item.label}'"),
+             item.portions, order),
         )
         item_id = int(cur.lastrowid)
+        order += 1
+
         for party, weight in item.shares.items():
             if float(weight or 0) > 0:
                 conn.execute(
                     "INSERT INTO bill_item_shares(item_id, party, weight) VALUES (?,?,?)",
                     (item_id, party, float(weight)),
                 )
+
+        # Sub-items sit right after their parent and get no shares of their own.
+        for sub in item.sub_items:
+            conn.execute(
+                """INSERT INTO bill_items(bill_id, parent_id, label, amount_cents, portions, sort_order)
+                   VALUES (?,?,?,?,1,?)""",
+                (bill_id, item_id, sub.label.strip(),
+                 _money(sub.amount, f"Extra '{sub.label}'"), order),
+            )
+            order += 1
 
     for order, extra in enumerate(payload.extras):
         conn.execute(
@@ -365,22 +410,40 @@ def preview_bill(
             "breakdown": [],
         }
 
+    # Mirror how the bill will be stored: parents get synthetic ids and their
+    # sub-items point at them, so the preview resolves inheritance exactly the
+    # way the saved bill will.
+    preview_items: list[dict[str, Any]] = []
+    for index, item in enumerate(payload.items):
+        parent_id = index + 1
+        preview_items.append({
+            "id": parent_id,
+            "parent_id": None,
+            "label": item.label,
+            "amount_cents": _money(item.amount, f"Item '{item.label}'"),
+            "portions": item.portions,
+            "shares": {k: v for k, v in item.shares.items() if k in parties},
+        })
+        for sub_index, sub in enumerate(item.sub_items):
+            preview_items.append({
+                "id": f"{parent_id}.{sub_index}",
+                "parent_id": parent_id,
+                "label": sub.label,
+                "amount_cents": _money(sub.amount, f"Extra '{sub.label}'"),
+                "portions": 1,
+                "shares": {},
+            })
+
     result = splitter.compute_bill(
         split_mode=payload.split_mode if payload.split_mode in SPLIT_MODES else "even",
         subtotal_cents=_money(payload.subtotal, "Subtotal"),
         participants=[{"party": p.party, "weight": p.weight} for p in known],
-        items=[
-            {
-                "label": i.label,
-                "amount_cents": _money(i.amount, f"Item '{i.label}'"),
-                "shares": {k: v for k, v in i.shares.items() if k in parties},
-            }
-            for i in payload.items
-        ],
+        items=preview_items,
         discount={
             "mode": payload.discount.mode,
             "percent": _percent(payload.discount.percent, "Discount"),
             "cents": _money(payload.discount.amount, "Discount"),
+            "target": payload.discount.target if payload.discount.target in parties else "all",
         },
         tax={
             "mode": payload.tax.mode,

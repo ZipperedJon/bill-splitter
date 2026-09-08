@@ -394,14 +394,57 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; white-sp
 .charge-row { display: grid; gap: 8px; grid-template-columns: 1fr auto; align-items: end; }
 .charge-row .seg { align-self: end; }
 
+.item-block { padding: 12px 0; border-bottom: 1px solid var(--border); }
+.item-block:last-of-type { border-bottom: 0; }
+
 .item-row {
-  display: grid; gap: 8px; padding: 11px 0;
+  display: grid; gap: 8px;
   grid-template-columns: minmax(0, 1fr) 110px 34px; align-items: center;
-  border-bottom: 1px solid var(--border);
 }
-.item-row:last-of-type { border-bottom: 0; }
 .item-row .who { grid-column: 1 / -1; display: flex; gap: 6px; flex-wrap: wrap; }
 .item-row .who .label-inline { font-size: .78rem; color: var(--text-faint); align-self: center; margin-right: 2px; }
+
+.item-actions { margin-top: 8px; gap: 6px; }
+.item-actions .btn { padding-left: 6px; padding-right: 6px; }
+
+/* Sub-items: modifications that ride along with the line above them. */
+.sub-list {
+  margin: 8px 0 0 12px; padding-left: 10px;
+  border-left: 2px solid var(--border);
+}
+.sub-row {
+  display: grid; gap: 6px; padding: 5px 0;
+  grid-template-columns: 14px minmax(0, 1fr) 100px 30px; align-items: center;
+}
+.sub-row input { min-height: 32px; padding: 5px 9px; font-size: .88rem; }
+.sub-row .money-input input { padding-left: 22px; }
+.sub-row .icon-btn { width: 28px; height: 28px; }
+.sub-tick { color: var(--text-faint); font-size: .85rem; text-align: center; }
+.sub-foot { padding: 4px 0 2px; }
+
+/* Portion stepper, for a line divided into individually claimable parts. */
+.portion-pick {
+  display: inline-flex; align-items: center; gap: 4px; padding: 2px 4px 2px 2px;
+  border: 1px solid var(--border-strong); border-radius: 999px; background: var(--surface);
+}
+.portion-pick.on { border-color: var(--accent); background: var(--accent-soft); }
+.portion-pick .icon-btn { width: 24px; height: 24px; border: 0; background: none; font-size: 15px; }
+.portion-pick .icon-btn:disabled { opacity: .3; cursor: not-allowed; }
+.portion-pick .portion-name { font-size: .84rem; font-weight: 550; }
+.portion-pick.on .portion-name { color: var(--accent); }
+.portion-pick .portion-count {
+  min-width: 18px; text-align: center; font-size: .84rem; font-weight: 700;
+  font-variant-numeric: tabular-nums; color: var(--text-dim);
+}
+.portion-pick.on .portion-count { color: var(--accent); }
+/* Native number spinners eat most of a narrow field and push the value out of
+   sight, so they are removed and the stepper buttons do that job instead. */
+.portion-input {
+  width: 52px; min-height: 30px; padding: 4px 4px; text-align: center;
+  appearance: textfield; -moz-appearance: textfield;
+}
+.portion-input::-webkit-outer-spin-button,
+.portion-input::-webkit-inner-spin-button { appearance: none; margin: 0; }
 
 .person-row {
   display: grid; gap: 8px; padding: 9px 0; align-items: center;

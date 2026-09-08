@@ -77,6 +77,31 @@ def _amount_from(mode: str, percent: float, cents: int, base_cents: int) -> int:
     return 0
 
 
+def _trim(value: float) -> str:
+    return str(int(value)) if float(value) == int(value) else str(round(float(value), 2))
+
+
+def _effective_shares(
+    item: dict[str, Any], by_id: dict[Any, dict[str, Any]], _depth: int = 0
+) -> dict[str, Any]:
+    """Who is on this line.
+
+    A sub-item has no claims of its own - a modification belongs to the dish it
+    modifies, so its cost follows whoever claimed the parent. That keeps
+    "tick the burger, get its bacon too" true by construction rather than by the
+    UI remembering to mirror the selection.
+
+    The depth guard is belt-and-braces: sub-items are one level deep by
+    construction, but a malformed parent chain must not recurse forever.
+    """
+    parent_id = item.get("parent_id")
+    if parent_id is not None and parent_id in by_id and _depth < 4:
+        parent = by_id[parent_id]
+        if parent is not item:
+            return _effective_shares(parent, by_id, _depth + 1)
+    return item.get("shares") or {}
+
+
 def _prop_weights(
     nets: dict[str, int], parties: Sequence[str], fallback: dict[str, float]
 ) -> list[float]:
@@ -105,9 +130,17 @@ def compute_bill(
     """Compute a full bill breakdown.
 
     participants: [{"party": "u:1", "weight": 1}]
-    items:        [{"label": "Steak", "amount_cents": 3200, "shares": {"u:1": 1}}]
+    items:        [{"id": 1, "label": "Steak", "amount_cents": 3200, "portions": 1,
+                    "parent_id": None, "shares": {"u:1": 1}}]
                   An item with no shares is split evenly across all participants.
-    discount/tax: {"mode": "none|percent|amount", "percent": 8.875, "cents": 350}
+                  A sub-item (parent_id set) carries no shares of its own and
+                  follows whoever claimed its parent.
+                  `portions` divides a line into individually claimable parts;
+                  a share's weight is how many of them that person took.
+    discount:     {"mode": "none|percent|amount", "percent": 8.875, "cents": 350,
+                   "target": "all" | "<party>"} - a party takes the whole
+                  discount, and a percentage is then of their share.
+    tax:          {"mode": "none|percent|amount", "percent": 8.875, "cents": 350}
     tip:          same, plus {"base": "pre_tax"|"post_tax"}
     extras:       [{"label": "Delivery", "mode": "amount", "cents": 599,
                     "percent": 0, "split": "even"|"proportional"}]
@@ -132,22 +165,38 @@ def compute_bill(
 
     if split_mode == "itemized":
         subtotal = sum(int(it.get("amount_cents", 0)) for it in item_list)
-        unassigned = 0
+        by_id = {it["id"]: it for it in item_list if it.get("id") is not None}
+        unassigned_lines = 0
+
         for item in item_list:
             shares: dict[str, float] = {
-                str(k): float(v) for k, v in (item.get("shares") or {}).items()
+                str(k): float(v) for k, v in _effective_shares(item, by_id).items()
                 if str(k) in base and float(v or 0) > 0
             }
             if not shares:
-                unassigned += 1
+                # Nobody picked this line. Sub-items follow their parent, so only
+                # count the top-level lines or the message double-counts.
+                if item.get("parent_id") is None:
+                    unassigned_lines += 1
                 shares = {p: 1.0 for p in parties}
+            else:
+                portions = max(1, int(item.get("portions") or 1))
+                claimed = sum(shares.values())
+                if portions > 1 and claimed > portions:
+                    label = item.get("label") or "An item"
+                    warnings.append(
+                        f"{label}: {_trim(claimed)} of {portions} portions claimed - "
+                        "more than exist, so it is being split in those proportions."
+                    )
+
             keys = [p for p in parties if p in shares]  # stable order
             for party, cents in zip(keys, allocate(int(item.get("amount_cents", 0)),
                                                    [shares[p] for p in keys])):
                 base[party] += cents
-        if unassigned:
+
+        if unassigned_lines:
             warnings.append(
-                f"{unassigned} item{'s' if unassigned != 1 else ''} "
+                f"{unassigned_lines} item{'s' if unassigned_lines != 1 else ''} "
                 "not assigned to anyone - split evenly across everyone."
             )
         if not item_list:
@@ -160,22 +209,37 @@ def compute_bill(
             base[party] = cents
 
     # --- 2. discount ---------------------------------------------------------
+    # A discount aimed at one person (their coupon, their comped dish) comes off
+    # their share alone, and a percentage then means a percentage *of their
+    # share* - which is what "20% off my meal" means to a human.
+    target = str(discount.get("target") or "all")
+    targeted = target in base
+    discount_basis = base[target] if targeted else subtotal
+
     discount_cents = _amount_from(
         discount.get("mode", "none"),
         discount.get("percent", 0) or 0,
         discount.get("cents", 0) or 0,
-        subtotal,
+        discount_basis,
     )
     discount_cents = max(0, discount_cents)
-    if discount_cents > subtotal and subtotal >= 0:
-        warnings.append("Discount was larger than the subtotal - capped at the subtotal.")
-        discount_cents = subtotal
+    if discount_cents > discount_basis and discount_basis >= 0:
+        warnings.append(
+            f"Discount was larger than {'their' if targeted else 'the'} share of the "
+            "bill - capped so nobody ends up owing less than nothing."
+            if targeted else
+            "Discount was larger than the subtotal - capped at the subtotal."
+        )
+        discount_cents = discount_basis
 
     discount_share: dict[str, int] = dict.fromkeys(parties, 0)
     if discount_cents:
-        w = _prop_weights(base, parties, weights)
-        for party, cents in zip(parties, allocate(-discount_cents, w)):
-            discount_share[party] = cents
+        if targeted:
+            discount_share[target] = -discount_cents
+        else:
+            w = _prop_weights(base, parties, weights)
+            for party, cents in zip(parties, allocate(-discount_cents, w)):
+                discount_share[party] = cents
 
     net_subtotal = subtotal - discount_cents
     net: dict[str, int] = {p: base[p] + discount_share[p] for p in parties}

@@ -24,7 +24,7 @@ from typing import Any, Iterator
 
 from . import config
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 DEFAULT_CATEGORIES = [
     ("Food & Restaurant", "restaurant", 10),
@@ -149,6 +149,10 @@ CREATE TABLE IF NOT EXISTS bills (
     discount_mode   TEXT NOT NULL DEFAULT 'none' CHECK (discount_mode IN ('none','percent','amount')),
     discount_percent REAL NOT NULL DEFAULT 0,
     discount_cents  INTEGER NOT NULL DEFAULT 0,
+    -- 'all' spreads the discount over everyone in proportion to their share.
+    -- A party key ('u:3' / 'g:7') takes it off that one person - someone's
+    -- coupon or comped dish should not quietly subsidise the whole table.
+    discount_target TEXT NOT NULL DEFAULT 'all',
 
     tax_mode        TEXT NOT NULL DEFAULT 'none' CHECK (tax_mode IN ('none','percent','amount')),
     tax_percent     REAL NOT NULL DEFAULT 0,
@@ -181,8 +185,17 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_bp_bill_party ON bill_participants(bill_id
 CREATE TABLE IF NOT EXISTS bill_items (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
     bill_id      INTEGER NOT NULL REFERENCES bills(id) ON DELETE CASCADE,
+    -- A modification hanging off another line ("add bacon", "oat milk").
+    -- Sub-items are never claimed on their own: their cost follows whoever
+    -- claimed the parent, so ticking the burger picks up its extras too.
+    -- One level deep only.
+    parent_id    INTEGER REFERENCES bill_items(id) ON DELETE CASCADE,
     label        TEXT NOT NULL DEFAULT '',
+    -- Line total, always. `portions` divides it into individually claimable
+    -- parts (3 beers on one line), and a claim's weight is how many someone
+    -- took - which the existing weighted split already handles.
     amount_cents INTEGER NOT NULL DEFAULT 0,
+    portions     INTEGER NOT NULL DEFAULT 1,
     sort_order   INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_items_bill ON bill_items(bill_id, sort_order);
@@ -275,6 +288,16 @@ CREATE TABLE IF NOT EXISTS update_log (
 CREATE INDEX IF NOT EXISTS idx_update_started ON update_log(started_at DESC);
 """
 
+# Indexes over columns that arrived after v1. These CANNOT live in SCHEMA:
+# init_db runs SCHEMA before migrating, and on an existing database
+# CREATE TABLE IF NOT EXISTS leaves the old table alone - so an index naming a
+# column the migration has not added yet fails with "no such column" and takes
+# the whole upgrade down with it. Created after migration, which covers a fresh
+# database and an upgraded one alike.
+LATE_INDEXES = """
+CREATE INDEX IF NOT EXISTS idx_items_parent ON bill_items(parent_id);
+"""
+
 
 def connect(path: Path | None = None) -> sqlite3.Connection:
     # check_same_thread=False is required, not merely convenient: FastAPI runs a
@@ -332,6 +355,9 @@ def init_db() -> None:
         else:
             _migrate(conn, int(current["value"]))
 
+        # Only safe once migrations have added the columns these name.
+        conn.executescript(LATE_INDEXES)
+
         for key, value in DEFAULT_SETTINGS.items():
             conn.execute("INSERT OR IGNORE INTO settings(key, value) VALUES (?,?)", (key, value))
 
@@ -369,6 +395,24 @@ def _migrate(conn: sqlite3.Connection, from_version: int) -> None:
         if not _has_column(conn, "bills", "revision"):
             conn.execute("ALTER TABLE bills ADD COLUMN revision INTEGER NOT NULL DEFAULT 0")
         version = 3
+
+    if version < 4:
+        # v4 added targeted discounts, sub-items and divisible items.
+        if not _has_column(conn, "bills", "discount_target"):
+            conn.execute(
+                "ALTER TABLE bills ADD COLUMN discount_target TEXT NOT NULL DEFAULT 'all'"
+            )
+        if not _has_column(conn, "bill_items", "parent_id"):
+            # A column with REFERENCES is allowed by ALTER TABLE as long as it
+            # defaults to NULL, which a top-level item's parent is anyway.
+            conn.execute(
+                "ALTER TABLE bill_items ADD COLUMN parent_id INTEGER REFERENCES bill_items(id)"
+            )
+        if not _has_column(conn, "bill_items", "portions"):
+            conn.execute(
+                "ALTER TABLE bill_items ADD COLUMN portions INTEGER NOT NULL DEFAULT 1"
+            )
+        version = 4
 
     if version != from_version:
         conn.execute("UPDATE meta SET value=? WHERE key='schema_version'", (str(version),))

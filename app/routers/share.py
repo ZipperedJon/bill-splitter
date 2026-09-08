@@ -256,12 +256,14 @@ def _public_payload(conn: sqlite3.Connection, share: sqlite3.Row) -> dict[str, A
     group = conn.execute("SELECT name FROM groups WHERE id=?", (bill["group_id"],)).fetchone()
 
     on_bill = [p["party"] for p in raw["participants"]]
+    # Only top-level lines are claimable; sub-items follow their parent.
     claims_by_item = {
-        item["id"]: [key for key in item["shares"] if key in on_bill] for item in raw["items"]
+        item["id"]: {k: float(v) for k, v in item["shares"].items() if k in on_bill}
+        for item in raw["tree"]
     }
     claimed_counts: dict[str, int] = defaultdict(int)
-    for keys in claims_by_item.values():
-        for key in keys:
+    for claims in claims_by_item.values():
+        for key in claims:
             claimed_counts[key] += 1
 
     people = [
@@ -319,9 +321,18 @@ def _public_payload(conn: sqlite3.Connection, share: sqlite3.Row) -> dict[str, A
                 "id": item["id"],
                 "label": item["label"] or "Item",
                 "amount_cents": item["amount_cents"],
-                "claimed_by": claims_by_item.get(item["id"], []),
+                "portions": item["portions"],
+                # Line price including its modifications, which is what the
+                # person ticking it actually takes on.
+                "line_total_cents": item["amount_cents"] + item["sub_total_cents"],
+                "sub_items": [
+                    {"label": sub["label"] or "Extra", "amount_cents": sub["amount_cents"]}
+                    for sub in item["sub_items"]
+                ],
+                "claimed_by": list(claims_by_item.get(item["id"], {}).keys()),
+                "claims": claims_by_item.get(item["id"], {}),
             }
-            for item in raw["items"]
+            for item in raw["tree"]
         ],
         "people": people,
         "charges": charges,
@@ -428,7 +439,11 @@ def join_bill(
 
 class ClaimsIn(BaseModel):
     party: str = Field(min_length=3, max_length=32)
+    # Whole lines taken, one portion each.
     item_ids: list[int] = Field(default_factory=list)
+    # item id -> how many portions of a divided line ("2 of the 3 beers").
+    # Takes precedence over item_ids for the same id.
+    portions: dict[str, float] = Field(default_factory=dict)
 
 
 @router.post("/api/share/{token}/claims")
@@ -454,14 +469,34 @@ def set_claims(
             "You are not on this bill any more - reload the page and pick again.",
         )
 
-    valid_items = {
-        r["id"] for r in conn.execute("SELECT id FROM bill_items WHERE bill_id=?", (bill_id,))
-    }
-    unknown = set(payload.item_ids) - valid_items
-    if unknown:
-        raise HTTPException(
-            status.HTTP_400_BAD_REQUEST, "Some of those items are not on this bill."
+    # Only top-level lines can be claimed; a modification belongs to its dish.
+    claimable = {
+        r["id"]: r["portions"] for r in conn.execute(
+            "SELECT id, portions FROM bill_items WHERE bill_id=? AND parent_id IS NULL",
+            (bill_id,),
         )
+    }
+
+    wanted: dict[int, float] = {item_id: 1.0 for item_id in payload.item_ids}
+    for raw_id, units in payload.portions.items():
+        try:
+            wanted[int(raw_id)] = float(units)
+        except (TypeError, ValueError):
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Bad portion count.")
+
+    for item_id, units in wanted.items():
+        if item_id not in claimable:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                "Some of those items are not on this bill, or are extras that "
+                "come with another item.",
+            )
+        if units > claimable[item_id]:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                f"That is more than the {claimable[item_id]} portion"
+                f"{'s' if claimable[item_id] != 1 else ''} on that line.",
+            )
 
     # Scoped to this party and this bill's items, so simultaneous claims by
     # different people at the same table do not collide.
@@ -470,11 +505,12 @@ def set_claims(
             WHERE party=? AND item_id IN (SELECT id FROM bill_items WHERE bill_id=?)""",
         (payload.party, bill_id),
     )
-    for item_id in dict.fromkeys(payload.item_ids):
-        conn.execute(
-            "INSERT INTO bill_item_shares(item_id, party, weight) VALUES (?,?,1)",
-            (item_id, payload.party),
-        )
+    for item_id, units in wanted.items():
+        if units > 0:
+            conn.execute(
+                "INSERT INTO bill_item_shares(item_id, party, weight) VALUES (?,?,?)",
+                (item_id, payload.party, units),
+            )
     _touch_bill(conn, bill_id)
 
     return _public_payload(conn, share)

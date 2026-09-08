@@ -19,8 +19,8 @@ const STORE_KEY = `billsplit.share.${TOKEN}`;
 
 const state = {
   data: null,
-  me: null,          // { party, name }
-  selected: new Set(),
+  me: null,               // { party, name }
+  taken: new Map(),       // item id -> how many portions I took
   saving: false,
   dirty: false,
 };
@@ -78,8 +78,8 @@ const api = {
   join: (name) => call(`/api/share/${encodeURIComponent(TOKEN)}/join`, {
     method: 'POST', body: JSON.stringify({ name }),
   }),
-  saveClaims: (party, itemIds) => call(`/api/share/${encodeURIComponent(TOKEN)}/claims`, {
-    method: 'POST', body: JSON.stringify({ party, item_ids: itemIds }),
+  saveClaims: (party, portions) => call(`/api/share/${encodeURIComponent(TOKEN)}/claims`, {
+    method: 'POST', body: JSON.stringify({ party, portions }),
   }),
 };
 
@@ -103,20 +103,27 @@ function header(data) {
 
 function receipt(data) {
   if (!data.items.length) return null;
+  const currency = data.bill.currency;
   return h('div.card', {},
     h('div.card-head', {}, h('h3', {}, 'The receipt'),
-      h('span.small.faint.right', {}, money(data.totals.subtotal_cents, data.bill.currency))),
+      h('span.small.faint.right', {}, money(data.totals.subtotal_cents, currency))),
     h('div.list', {}, ...data.items.map((item) => h('div.item', { style: { cursor: 'default' } },
       h('span.grow', {},
-        h('div.title', {}, item.label),
+        h('div.title', {}, item.label,
+          item.portions > 1
+            ? h('span.faint.small', {}, ` · ${item.portions} portions`)
+            : null),
+        ...item.sub_items.map((sub) => h('div.meta', {},
+          `↳ ${sub.label}`,
+          sub.amount_cents ? ` ${money(sub.amount_cents, currency)}` : '')),
         h('div.meta', {}, item.claimed_by.length
           ? `${item.claimed_by.length} ${item.claimed_by.length === 1 ? 'person' : 'people'}`
           : 'nobody yet')),
-      h('span.money', {}, money(item.amount_cents, data.bill.currency))))),
+      h('span.money', {}, money(item.line_total_cents, currency))))),
     data.charges.length ? h('div.card-body.tight', {},
       ...data.charges.map((charge) => h('div.totals-line', {},
         h('span.dim.small', {}, charge.label),
-        h('span.v.small', {}, money(charge.cents, data.bill.currency))))) : null,
+        h('span.v.small', {}, money(charge.cents, currency))))) : null,
   );
 }
 
@@ -235,22 +242,34 @@ function renderPicker() {
     return renderIdentity();
   }
 
-  state.selected = new Set(
-    data.items.filter((item) => item.claimed_by.includes(me.party)).map((item) => item.id),
+  // party -> how many portions they took. A plain whole item is just 1.
+  state.taken = new Map(
+    data.items
+      .map((item) => [item.id, Number((item.claims || {})[me.party] || 0)])
+      .filter(([, units]) => units > 0),
   );
+
+  const nameOf = (party) => (data.people.find((p) => p.party === party) || {}).name;
 
   const totalBox = h('div.card.card-body');
   const drawTotal = () => {
-    const chosen = data.items.filter((item) => state.selected.has(item.id));
-    // Sharers on an item split it; show that honestly rather than the full price.
-    const raw = chosen.reduce((sum, item) => {
-      const others = item.claimed_by.filter((p) => p !== me.party).length;
-      return sum + item.amount_cents / (others + 1);
-    }, 0);
+    let raw = 0;
+    let count = 0;
+    for (const item of data.items) {
+      const mine = state.taken.get(item.id) || 0;
+      if (mine <= 0) continue;
+      count += 1;
+      // Everyone else's portions on this line, so the running figure reflects
+      // sharing rather than showing the whole line price.
+      const others = Object.entries(item.claims || {})
+        .filter(([party]) => party !== me.party)
+        .reduce((sum, [, units]) => sum + Number(units || 0), 0);
+      raw += (item.line_total_cents * mine) / (mine + others);
+    }
     mount(totalBox,
       h('div.spread', {},
         h('span', {}, h('div.label', {}, 'Your items'),
-          h('div.faint.tiny', {}, `${chosen.length} of ${data.items.length}`)),
+          h('div.faint.tiny', {}, `${count} of ${data.items.length}`)),
         h('span.strong', { style: { fontSize: '1.35rem' } }, money(Math.round(raw), currency))),
       h('p.tiny.faint', { style: { margin: '8px 0 0' } },
         'Before tax, tip and fees are shared out. Your final figure is on the next screen.'),
@@ -260,35 +279,71 @@ function renderPicker() {
   const itemList = h('div.list');
   const drawItems = () => {
     mount(itemList, ...data.items.map((item) => {
-      const on = state.selected.has(item.id);
-      const others = item.claimed_by.filter((p) => p !== me.party);
-      const otherNames = others
-        .map((party) => (data.people.find((p) => p.party === party) || {}).name)
+      const mine = state.taken.get(item.id) || 0;
+      const on = mine > 0;
+      const divided = item.portions > 1;
+      const otherNames = Object.keys(item.claims || {})
+        .filter((party) => party !== me.party)
+        .map(nameOf)
         .filter(Boolean);
+
+      const set = (units) => {
+        const clamped = Math.max(0, Math.min(item.portions, units));
+        if (clamped === 0) state.taken.delete(item.id);
+        else state.taken.set(item.id, clamped);
+        state.dirty = true;
+        drawItems();
+        drawTotal();
+      };
+
+      const subLines = item.sub_items.map((sub) => h('div.meta', {},
+        `↳ ${sub.label}`,
+        sub.amount_cents ? ` ${money(sub.amount_cents, currency)}` : ''));
+
+      const detail = h('span.grow', {},
+        h('div.title', {}, item.label),
+        ...subLines,
+        h('div.meta', {},
+          divided
+            ? (on
+                ? `you took ${mine} of ${item.portions}`
+                : `${item.portions} portions — tap + for yours`)
+            : otherNames.length
+              ? `shared with ${otherNames.join(', ')}`
+              : on ? 'just you' : 'tap to add'),
+      );
+
+      // A divided line needs a stepper, so the row is a div with its own
+      // buttons rather than one big tappable button.
+      if (divided) {
+        return h('div.item', { style: on ? { background: 'var(--accent-soft)' } : {} },
+          detail,
+          h('span.stack-sm', { style: { textAlign: 'right' } },
+            h('span.money', {}, money(item.line_total_cents, currency)),
+            h('span.portion-pick', { class: on ? 'on' : '' },
+              h('button.icon-btn', {
+                type: 'button', 'aria-label': 'One fewer',
+                disabled: readOnly || mine <= 0, onclick: () => set(mine - 1),
+              }, '−'),
+              h('span.portion-count', {}, String(mine)),
+              h('button.icon-btn', {
+                type: 'button', 'aria-label': 'One more',
+                disabled: readOnly || mine >= item.portions, onclick: () => set(mine + 1),
+              }, '+'))),
+        );
+      }
 
       return h('button.item', {
         type: 'button',
         disabled: readOnly,
         style: on ? { background: 'var(--accent-soft)' } : {},
-        onclick: () => {
-          if (readOnly) return;
-          on ? state.selected.delete(item.id) : state.selected.add(item.id);
-          state.dirty = true;
-          drawItems();
-          drawTotal();
-        },
+        onclick: () => set(on ? 0 : 1),
       },
         h('span.cat-icon', {
-          style: on
-            ? { background: 'var(--accent)', color: 'var(--accent-text)' }
-            : {},
+          style: on ? { background: 'var(--accent)', color: 'var(--accent-text)' } : {},
         }, on ? '✓' : ''),
-        h('span.grow', {},
-          h('div.title', {}, item.label),
-          h('div.meta', {}, otherNames.length
-            ? `shared with ${otherNames.join(', ')}`
-            : on ? 'just you' : 'tap to add')),
-        h('span.money', {}, money(item.amount_cents, currency)),
+        detail,
+        h('span.money', {}, money(item.line_total_cents, currency)),
       );
     }));
   };
@@ -304,7 +359,7 @@ function renderPicker() {
     const label = saveButton.textContent;
     saveButton.textContent = 'Saving…';
     try {
-      state.data = await api.saveClaims(me.party, [...state.selected]);
+      state.data = await api.saveClaims(me.party, Object.fromEntries(state.taken));
       state.dirty = false;
       renderDone();
     } catch (error) {

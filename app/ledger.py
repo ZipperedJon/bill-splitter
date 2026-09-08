@@ -86,13 +86,18 @@ def load_bill(conn: sqlite3.Connection, bill_id: int) -> dict[str, Any] | None:
     ):
         shares_by_item.setdefault(r["item_id"], {})[r["party"]] = r["weight"]
 
+    # Flat list for the split engine (it resolves parents itself), plus a
+    # parent-with-sub_items shape for the UI. Sub-items deliberately carry no
+    # shares: they follow their parent.
     items = [
         {
             "id": r["id"],
+            "parent_id": r["parent_id"],
             "label": r["label"],
             "amount_cents": r["amount_cents"],
+            "portions": r["portions"],
             "sort_order": r["sort_order"],
-            "shares": shares_by_item.get(r["id"], {}),
+            "shares": shares_by_item.get(r["id"], {}) if r["parent_id"] is None else {},
         }
         for r in conn.execute(
             "SELECT * FROM bill_items WHERE bill_id=? ORDER BY sort_order, id", (bill_id,)
@@ -124,9 +129,30 @@ def load_bill(conn: sqlite3.Connection, bill_id: int) -> dict[str, Any] | None:
         "bill": dict(bill),
         "participants": participants,
         "items": items,
+        "tree": nest_items(items),
         "extras": extras,
         "payments": payments,
     }
+
+
+def nest_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Top-level items, each with its sub-items attached, for the UI."""
+    children: dict[Any, list[dict[str, Any]]] = {}
+    for item in items:
+        if item.get("parent_id") is not None:
+            children.setdefault(item["parent_id"], []).append(item)
+    return [
+        {
+            **item,
+            "sub_items": [
+                {k: v for k, v in child.items() if k != "shares"}
+                for child in children.get(item["id"], [])
+            ],
+            "sub_total_cents": sum(c["amount_cents"] for c in children.get(item["id"], [])),
+        }
+        for item in items
+        if item.get("parent_id") is None
+    ]
 
 
 def compute(raw: dict[str, Any]) -> dict[str, Any]:
@@ -140,6 +166,7 @@ def compute(raw: dict[str, Any]) -> dict[str, Any]:
             "mode": b["discount_mode"],
             "percent": b["discount_percent"],
             "cents": b["discount_cents"],
+            "target": b["discount_target"],
         },
         tax={"mode": b["tax_mode"], "percent": b["tax_percent"], "cents": b["tax_cents"]},
         tip={
@@ -177,7 +204,7 @@ def bill_detail(conn: sqlite3.Connection, bill_id: int) -> dict[str, Any] | None
     return {
         "bill": raw["bill"],
         "participants": raw["participants"],
-        "items": raw["items"],
+        "items": raw["tree"],
         "extras": raw["extras"],
         "payments": raw["payments"],
         "totals": {k: v for k, v in result.items() if k != "per_party"},

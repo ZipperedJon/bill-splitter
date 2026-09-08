@@ -328,6 +328,226 @@ def test_no_pennies_lost_across_many_random_bills():
         assert sum(v["owed_cents"] for v in r["per_party"].values()) == r["total_cents"]
 
 
+# --- sub-items, divided items, targeted discounts ----------------------------
+
+def test_sub_items_follow_whoever_claimed_the_parent():
+    # Ticking the burger has to pick up its bacon: a modification belongs to
+    # the dish, not to the table.
+    r = compute_bill(
+        split_mode="itemized",
+        participants=P("u:1", "u:2", "u:3"),
+        items=[
+            {"id": 1, "parent_id": None, "label": "Burger", "amount_cents": 1200, "shares": {"u:1": 1}},
+            {"id": 2, "parent_id": 1, "label": "Add bacon", "amount_cents": 200, "shares": {}},
+            {"id": 3, "parent_id": 1, "label": "No onions", "amount_cents": 0, "shares": {}},
+            {"id": 4, "parent_id": None, "label": "Salad", "amount_cents": 900, "shares": {"u:2": 1}},
+        ],
+    )
+    assert r["subtotal_cents"] == 2300
+    assert r["per_party"]["u:1"]["base_cents"] == 1400   # burger + bacon
+    assert r["per_party"]["u:2"]["base_cents"] == 900
+    assert r["per_party"]["u:3"]["base_cents"] == 0
+    assert not r["warnings"]
+
+
+def test_sub_items_of_a_shared_parent_are_shared_too():
+    r = compute_bill(
+        split_mode="itemized",
+        participants=P("u:1", "u:2"),
+        items=[
+            {"id": 1, "parent_id": None, "amount_cents": 2000, "shares": {"u:1": 1, "u:2": 1}},
+            {"id": 2, "parent_id": 1, "amount_cents": 400, "shares": {}},
+        ],
+    )
+    assert r["per_party"]["u:1"]["base_cents"] == 1200
+    assert r["per_party"]["u:2"]["base_cents"] == 1200
+
+
+def test_an_unclaimed_parent_takes_its_sub_items_with_it_and_warns_once():
+    # Two rows are unassigned, but it is one line as far as a human is concerned.
+    r = compute_bill(
+        split_mode="itemized",
+        participants=P("u:1", "u:2"),
+        items=[
+            {"id": 1, "parent_id": None, "label": "Burger", "amount_cents": 1000, "shares": {}},
+            {"id": 2, "parent_id": 1, "label": "Add cheese", "amount_cents": 200, "shares": {}},
+        ],
+    )
+    assert r["per_party"]["u:1"]["base_cents"] == 600
+    assert r["per_party"]["u:2"]["base_cents"] == 600
+    assert sum("not assigned" in w for w in r["warnings"]) == 1
+    assert "1 item" in " ".join(r["warnings"])
+
+
+def test_a_divided_item_splits_by_portions_taken():
+    # Three beers on one line: two for one person, one for another.
+    r = compute_bill(
+        split_mode="itemized",
+        participants=P("u:1", "u:2", "u:3"),
+        items=[{"id": 1, "parent_id": None, "label": "Beer", "amount_cents": 1800,
+                "portions": 3, "shares": {"u:1": 2, "u:2": 1}}],
+    )
+    assert r["per_party"]["u:1"]["base_cents"] == 1200
+    assert r["per_party"]["u:2"]["base_cents"] == 600
+    assert r["per_party"]["u:3"]["base_cents"] == 0
+    assert not r["warnings"]
+
+
+def test_a_partly_claimed_divided_item_charges_the_takers():
+    # One of three beers claimed. The line total is what was actually spent, so
+    # it lands on the person who claimed rather than evaporating.
+    r = compute_bill(
+        split_mode="itemized",
+        participants=P("u:1", "u:2"),
+        items=[{"id": 1, "parent_id": None, "amount_cents": 1800, "portions": 3,
+                "shares": {"u:1": 1}}],
+    )
+    assert r["per_party"]["u:1"]["base_cents"] == 1800
+    assert r["per_party"]["u:2"]["base_cents"] == 0
+    assert sum(v["owed_cents"] for v in r["per_party"].values()) == r["total_cents"]
+
+
+def test_over_claiming_portions_warns_but_still_balances():
+    r = compute_bill(
+        split_mode="itemized",
+        participants=P("u:1", "u:2"),
+        items=[{"id": 1, "parent_id": None, "label": "Beer", "amount_cents": 1800,
+                "portions": 3, "shares": {"u:1": 2, "u:2": 2}}],
+    )
+    assert any("more than exist" in w for w in r["warnings"])
+    assert r["per_party"]["u:1"]["base_cents"] == 900
+    assert sum(v["owed_cents"] for v in r["per_party"].values()) == r["total_cents"]
+
+
+def test_divided_item_with_sub_items():
+    """A pizza divided four ways, with a topping charge that rides along."""
+    r = compute_bill(
+        split_mode="itemized",
+        participants=P("u:1", "u:2", "u:3"),
+        items=[
+            {"id": 1, "parent_id": None, "label": "Pizza", "amount_cents": 2000,
+             "portions": 4, "shares": {"u:1": 3, "u:2": 1}},
+            {"id": 2, "parent_id": 1, "label": "Extra cheese", "amount_cents": 400, "shares": {}},
+        ],
+    )
+    # Both rows follow the same 3:1 split.
+    assert r["per_party"]["u:1"]["base_cents"] == 1500 + 300
+    assert r["per_party"]["u:2"]["base_cents"] == 500 + 100
+    assert r["per_party"]["u:3"]["base_cents"] == 0
+
+
+def test_targeted_discount_comes_off_one_person():
+    r = compute_bill(
+        split_mode="even", subtotal_cents=9000, participants=P("u:1", "u:2", "u:3"),
+        discount={"mode": "amount", "cents": 1500, "target": "u:2"},
+        tax={"mode": "percent", "percent": 10},
+    )
+    assert r["discount_cents"] == 1500
+    assert r["per_party"]["u:2"]["discount_cents"] == -1500
+    assert r["per_party"]["u:1"]["discount_cents"] == 0
+    assert r["per_party"]["u:3"]["discount_cents"] == 0
+    # Their tax drops with their share; the others' does not.
+    assert r["per_party"]["u:2"]["owed_cents"] == 1650
+    assert r["per_party"]["u:1"]["owed_cents"] == 3300
+    assert sum(v["owed_cents"] for v in r["per_party"].values()) == r["total_cents"]
+
+
+def test_targeted_percent_discount_is_a_percent_of_their_share():
+    r = compute_bill(
+        split_mode="even", subtotal_cents=9000, participants=P("u:1", "u:2", "u:3"),
+        discount={"mode": "percent", "percent": 50, "target": "u:1"},
+    )
+    assert r["discount_cents"] == 1500      # half of their 30.00, not of 90.00
+    assert r["per_party"]["u:1"]["owed_cents"] == 1500
+    assert r["per_party"]["u:2"]["owed_cents"] == 3000
+
+
+def test_targeted_discount_is_capped_at_that_persons_share():
+    r = compute_bill(
+        split_mode="even", subtotal_cents=3000, participants=P("u:1", "u:2", "u:3"),
+        discount={"mode": "amount", "cents": 5000, "target": "u:1"},
+    )
+    assert r["per_party"]["u:1"]["owed_cents"] == 0, "never below zero"
+    assert r["per_party"]["u:2"]["owed_cents"] == 1000, "others are unaffected"
+    assert any("capped" in w for w in r["warnings"])
+    assert sum(v["owed_cents"] for v in r["per_party"].values()) == r["total_cents"]
+
+
+def test_targeted_discount_on_an_itemized_bill():
+    """The classic: one person had a coupon for their own dish."""
+    r = compute_bill(
+        split_mode="itemized",
+        participants=P("u:1", "u:2"),
+        items=[
+            {"id": 1, "parent_id": None, "amount_cents": 4000, "shares": {"u:1": 1}},
+            {"id": 2, "parent_id": None, "amount_cents": 2000, "shares": {"u:2": 1}},
+        ],
+        discount={"mode": "amount", "cents": 1000, "target": "u:1"},
+        tax={"mode": "percent", "percent": 10},
+    )
+    assert r["net_subtotal_cents"] == 5000
+    assert r["per_party"]["u:1"]["net_cents"] == 3000
+    assert r["per_party"]["u:2"]["net_cents"] == 2000
+    assert r["per_party"]["u:1"]["tax_cents"] == 300
+    assert r["per_party"]["u:2"]["tax_cents"] == 200
+    assert sum(v["owed_cents"] for v in r["per_party"].values()) == r["total_cents"]
+
+
+def test_an_unknown_discount_target_falls_back_to_everyone():
+    r = compute_bill(
+        split_mode="even", subtotal_cents=3000, participants=P("u:1", "u:2", "u:3"),
+        discount={"mode": "amount", "cents": 300, "target": "u:999"},
+    )
+    assert all(v["discount_cents"] == -100 for v in r["per_party"].values())
+
+
+def test_nothing_lost_with_sub_items_portions_and_targeted_discounts():
+    import random
+
+    rng = random.Random(99)
+    for _ in range(400):
+        n = rng.randint(1, 5)
+        parties = [f"u:{i}" for i in range(n)]
+        items = []
+        next_id = 1
+        for _ in range(rng.randint(0, 5)):
+            parent_id = next_id
+            next_id += 1
+            portions = rng.choice([1, 1, 2, 3, 4])
+            takers = [p for p in parties if rng.random() < 0.6]
+            items.append({
+                "id": parent_id, "parent_id": None,
+                "amount_cents": rng.randint(1, 9999), "portions": portions,
+                "shares": {p: rng.randint(1, portions) for p in takers},
+            })
+            for _ in range(rng.randint(0, 2)):
+                items.append({
+                    "id": next_id, "parent_id": parent_id,
+                    "amount_cents": rng.randint(0, 800), "portions": 1, "shares": {},
+                })
+                next_id += 1
+
+        r = compute_bill(
+            split_mode="itemized",
+            participants=[{"party": p, "weight": 1} for p in parties],
+            items=items,
+            discount={
+                "mode": rng.choice(["none", "percent", "amount"]),
+                "percent": rng.uniform(0, 60), "cents": rng.randint(0, 4000),
+                "target": rng.choice(["all"] + parties),
+            },
+            tax={"mode": "percent", "percent": rng.uniform(0, 15)},
+            tip={"mode": "percent", "percent": rng.uniform(0, 25),
+                 "base": rng.choice(["pre_tax", "post_tax"])},
+            extras=[{"label": "x", "mode": "amount", "cents": rng.randint(0, 2000),
+                     "split": rng.choice(["even", "proportional"])}],
+        )
+        assert sum(v["owed_cents"] for v in r["per_party"].values()) == r["total_cents"]
+        assert all(v["owed_cents"] >= 0 for v in r["per_party"].values()), (
+            "a discount must never push somebody below zero"
+        )
+
+
 # --- settling up -------------------------------------------------------------
 
 def test_settle_simple():

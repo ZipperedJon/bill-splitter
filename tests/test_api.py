@@ -332,6 +332,166 @@ def test_itemized_bill_end_to_end():
     assert lines[jon]["tax_cents"] > lines[dana]["tax_cents"]
 
 
+def test_sub_items_round_trip_and_follow_the_parent():
+    client = fresh_client()
+    signup_admin(client)
+    group_id, jon, sam = _two_user_group(client)
+
+    r = client.post(
+        f"/api/groups/{group_id}/bills",
+        json={
+            "title": "Burgers", "split_mode": "itemized",
+            "items": [
+                {"label": "Burger", "amount": "12.00", "shares": {jon: 1}, "sub_items": [
+                    {"label": "Add bacon", "amount": "2.00"},
+                    {"label": "No onions", "amount": "0"},
+                ]},
+                {"label": "Salad", "amount": "9.00", "shares": {sam: 1}},
+            ],
+            "participants": [{"party": jon}, {"party": sam}],
+        },
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["totals"]["subtotal_cents"] == 2300
+    lines = {b["party"]: b for b in body["breakdown"]}
+    assert lines[jon]["base_cents"] == 1400, "burger carries its bacon"
+    assert lines[sam]["base_cents"] == 900
+
+    # Read back: sub-items are nested under their parent, not loose lines.
+    detail = client.get(f"/api/bills/{body['bill_id']}").json()
+    assert len(detail["items"]) == 2
+    burger = next(i for i in detail["items"] if i["label"] == "Burger")
+    assert [s["label"] for s in burger["sub_items"]] == ["Add bacon", "No onions"]
+    assert burger["sub_total_cents"] == 200
+    assert next(i for i in detail["items"] if i["label"] == "Salad")["sub_items"] == []
+
+    # And editing keeps them.
+    r = client.put(
+        f"/api/bills/{body['bill_id']}",
+        json={
+            "title": "Burgers", "split_mode": "itemized",
+            "items": [{"label": "Burger", "amount": "12.00", "shares": {jon: 1},
+                       "sub_items": [{"label": "Add bacon", "amount": "2.50"}]}],
+            "participants": [{"party": jon}, {"party": sam}],
+        },
+    )
+    assert r.status_code == 200
+    assert r.json()["items"][0]["sub_items"][0]["amount_cents"] == 250
+
+
+def test_divided_items_round_trip():
+    client = fresh_client()
+    signup_admin(client)
+    group_id, jon, sam = _two_user_group(client)
+
+    r = client.post(
+        f"/api/groups/{group_id}/bills",
+        json={
+            "title": "Round of beers", "split_mode": "itemized",
+            "items": [{"label": "Beer", "amount": "18.00", "portions": 3,
+                       "shares": {jon: 2, sam: 1}}],
+            "participants": [{"party": jon}, {"party": sam}],
+        },
+    )
+    assert r.status_code == 200, r.text
+    lines = {b["party"]: b for b in r.json()["breakdown"]}
+    assert lines[jon]["base_cents"] == 1200
+    assert lines[sam]["base_cents"] == 600
+
+    detail = client.get(f"/api/bills/{r.json()['bill_id']}").json()
+    assert detail["items"][0]["portions"] == 3
+    assert detail["items"][0]["shares"] == {jon: 2, sam: 1}
+
+
+def test_cannot_take_more_portions_than_exist():
+    client = fresh_client()
+    signup_admin(client)
+    group_id, jon, sam = _two_user_group(client)
+    r = client.post(
+        f"/api/groups/{group_id}/bills",
+        json={
+            "title": "Beers", "split_mode": "itemized",
+            "items": [{"label": "Beer", "amount": "18.00", "portions": 2, "shares": {jon: 5}}],
+            "participants": [{"party": jon}, {"party": sam}],
+        },
+    )
+    assert r.status_code == 400
+    assert "more than the 2 portions" in r.json()["detail"]
+
+
+def test_targeted_discount_round_trip():
+    client = fresh_client()
+    signup_admin(client)
+    group_id, jon, sam = _two_user_group(client)
+
+    r = client.post(
+        f"/api/groups/{group_id}/bills",
+        json={
+            "title": "Dinner with a coupon", "split_mode": "even", "subtotal": "60.00",
+            "discount": {"mode": "amount", "amount": "10.00", "target": sam},
+            "tax": {"mode": "percent", "percent": 10},
+            "participants": [{"party": jon}, {"party": sam}],
+        },
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["bill"]["discount_target"] == sam
+    lines = {b["party"]: b for b in body["breakdown"]}
+    assert lines[sam]["discount_cents"] == -1000
+    assert lines[jon]["discount_cents"] == 0
+    assert lines[jon]["owed_cents"] == 3300      # 30 + 10% tax
+    assert lines[sam]["owed_cents"] == 2200      # 20 + 10% tax
+    assert sum(b["owed_cents"] for b in body["breakdown"]) == body["totals"]["total_cents"]
+
+    # Reloading keeps the target, so the editor shows the right person.
+    detail = client.get(f"/api/bills/{body['bill_id']}").json()
+    assert detail["bill"]["discount_target"] == sam
+
+
+def test_a_discount_aimed_at_someone_off_the_bill_is_refused():
+    client = fresh_client()
+    signup_admin(client)
+    group_id, jon, sam = _two_user_group(client)
+    r = client.post(
+        f"/api/groups/{group_id}/bills",
+        json={
+            "title": "x", "split_mode": "even", "subtotal": "10.00",
+            "discount": {"mode": "amount", "amount": "1.00", "target": sam},
+            "participants": [{"party": jon}],
+        },
+    )
+    assert r.status_code == 400
+    assert "not on this bill" in r.json()["detail"]
+
+
+def test_preview_matches_the_saved_bill_for_sub_items_and_portions():
+    """The editor previews before saving; the two must not disagree."""
+    client = fresh_client()
+    signup_admin(client)
+    group_id, jon, sam = _two_user_group(client)
+
+    payload = {
+        "title": "Mixed", "split_mode": "itemized",
+        "items": [
+            {"label": "Burger", "amount": "12.00", "shares": {jon: 1},
+             "sub_items": [{"label": "Bacon", "amount": "2.00"}]},
+            {"label": "Beer", "amount": "18.00", "portions": 3, "shares": {jon: 1, sam: 2}},
+        ],
+        "discount": {"mode": "percent", "percent": 10, "target": sam},
+        "tax": {"mode": "percent", "percent": 8.875},
+        "tip": {"mode": "percent", "percent": 20, "base": "post_tax"},
+        "participants": [{"party": jon}, {"party": sam}],
+    }
+
+    preview = client.post("/api/bills/preview", json={**payload, "group_id": group_id}).json()
+    saved = client.post(f"/api/groups/{group_id}/bills", json=payload).json()
+
+    assert preview["totals"]["total_cents"] == saved["totals"]["total_cents"]
+    assert {b["party"]: b["owed_cents"] for b in preview["breakdown"]} \
+        == {b["party"]: b["owed_cents"] for b in saved["breakdown"]}
+
+
 def test_shares_mode_for_a_couple_sharing_a_room():
     client = fresh_client()
     signup_admin(client)
