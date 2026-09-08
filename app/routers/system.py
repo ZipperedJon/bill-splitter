@@ -57,7 +57,18 @@ def me(
 
 @router.get("/health")
 def health() -> dict[str, Any]:
-    return {"ok": True, "version": config.VERSION}
+    """Public, and deliberately says which code is running.
+
+    `curl localhost:9100/api/health` is then enough to answer "did my update
+    actually land?" from the Pi itself, without signing in or reading the UI -
+    which matters because a browser showing stale cached assets looks exactly
+    like an update that never happened.
+    """
+    return {
+        "ok": True,
+        "version": config.VERSION,
+        "commit": updater.local_commit_short(),
+    }
 
 
 # --- updates -----------------------------------------------------------------

@@ -36,6 +36,28 @@ Auto-update is **off** by default: until you turn it on (Admin → Updates) or
 press the button, the app stays on the version you installed. It still checks
 hourly and tells you when something is waiting.
 
+### If an update does not seem to have landed
+
+```bash
+cd ~/bill-splitter && ./install.sh --doctor
+```
+
+That prints which directory the service actually runs from, the commit and
+version on disk, how many commits behind the remote you are, whether there are
+local edits blocking the pull, and what the running app reports on
+`/api/health`. Those five facts separate the cases that look identical from the
+outside: a stale browser cache, an update that never fetched, a service started
+from a different directory, and a service that never restarted.
+
+`curl localhost:9100/api/health` on its own reports the version and commit that
+are actually serving requests, which is the fastest way to tell a browser
+caching problem from a code problem.
+
+If the version on disk is current but the browser still looks old, hard-refresh
+once (Ctrl+Shift+R). Versions before 1.2.1 served the frontend without a
+`Cache-Control` header, so browsers were free to reuse the old JavaScript
+without checking.
+
 `./install.sh --uninstall` removes the service and leaves your data alone.
 
 <details>

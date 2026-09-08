@@ -78,9 +78,12 @@ async def lifespan(app: FastAPI):
         security.purge_expired_sessions(conn)
         users = conn.execute("SELECT COUNT(*) AS n FROM users").fetchone()["n"]
 
+    # The commit goes in the boot line so `journalctl -u bill-splitter` answers
+    # "which version is actually running" without any guesswork.
     log.info(
-        "Bill Splitter v%s on http://%s:%s (%s)",
-        config.VERSION, config.HOST, config.PORT,
+        "Bill Splitter v%s (%s) on http://%s:%s (%s)",
+        config.VERSION, updater.local_commit_short() or "no git",
+        config.HOST, config.PORT,
         "fresh install - first sign-up becomes admin" if users == 0 else f"{users} account(s)",
     )
 

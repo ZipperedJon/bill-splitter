@@ -37,6 +37,58 @@ need_sudo() {
   fi
 }
 
+# --- doctor ------------------------------------------------------------------
+# `./install.sh --doctor` answers "what is actually running, and is it current?"
+# in one command. Worth having: a browser holding stale cached assets, a service
+# started from a different directory, and an update that never fetched all look
+# identical from the outside.
+if [ "${1:-}" = "--doctor" ]; then
+  # Every lookup below is guarded: with `set -euo pipefail` a missing systemctl
+  # or a non-repo directory would abort the script mid-diagnosis and print
+  # nothing at all, which is the least helpful possible outcome.
+  set +e
+  set +o pipefail
+
+  SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)"
+  [ -z "$SELF_DIR" ] && SELF_DIR="$PWD"
+  SVC_DIR="$(systemctl show -p WorkingDirectory --value "$SERVICE" 2>/dev/null | sed 's/^WorkingDirectory=//')"
+  [ -z "$SVC_DIR" ] && SVC_DIR="(no systemd unit)"
+
+  printf '\n%s\n\n' "${BOLD}Bill Splitter doctor${OFF}"
+  printf '  %-22s %s\n' "this checkout" "$SELF_DIR"
+  printf '  %-22s %s\n' "service runs in" "$SVC_DIR"
+  if [ "$SVC_DIR" != "(no systemd unit)" ] && [ "$SVC_DIR" != "$SELF_DIR" ]; then
+    warn "The service runs somewhere else - updating here changes nothing."
+  fi
+  printf '  %-22s %s\n' "VERSION file" "$(cat "$SELF_DIR/VERSION" 2>/dev/null || echo '?')"
+
+  if [ -d "$SELF_DIR/.git" ]; then
+    printf '  %-22s %s\n' "commit" "$(git -C "$SELF_DIR" rev-parse --short HEAD 2>/dev/null || echo '?')"
+    printf '  %-22s %s\n' "branch" "$(git -C "$SELF_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo '?')"
+    printf '  %-22s %s\n' "remote" "$(git -C "$SELF_DIR" remote get-url origin 2>/dev/null || echo 'none')"
+    DIRTY="$(git -C "$SELF_DIR" status --porcelain --untracked-files=no | wc -l | tr -d ' ')"
+    printf '  %-22s %s\n' "local edits" "$DIRTY file(s)"
+    if git -C "$SELF_DIR" fetch -q origin "$BRANCH" 2>/dev/null; then
+      BEHIND="$(git -C "$SELF_DIR" rev-list --count "HEAD..origin/$BRANCH" 2>/dev/null || echo '?')"
+      printf '  %-22s %s\n' "commits behind" "$BEHIND"
+      [ "$BEHIND" != "0" ] && [ "$BEHIND" != "?" ] && \
+        warn "Out of date. Run: git -C $SELF_DIR reset --hard origin/$BRANCH && $SELF_DIR/install.sh"
+    else
+      printf '  %-22s %s\n' "commits behind" "(could not reach GitHub)"
+    fi
+  else
+    warn "Not a git checkout - it cannot update itself. Re-install with install.sh."
+  fi
+
+  printf '  %-22s %s\n' "share page present" \
+    "$([ -f "$SELF_DIR/static/js/share.js" ] && echo yes || echo 'NO - old version')"
+  printf '  %-22s %s\n' "service state" "$(systemctl is-active "$SERVICE" 2>/dev/null || echo 'not installed')"
+  printf '  %-22s %s\n' "answering on :$PORT" \
+    "$(curl -fsS --max-time 3 "http://127.0.0.1:$PORT/api/health" 2>/dev/null || echo 'no response')"
+  printf '\n  %s\n\n' "${DIM}If the served version and the commit above disagree, restart the service.${OFF}"
+  exit 0
+fi
+
 # --- uninstall ---------------------------------------------------------------
 if [ "${1:-}" = "--uninstall" ]; then
   need_sudo
