@@ -211,6 +211,14 @@ def test_the_frontend_is_revalidated_so_updates_actually_show_up():
         assert share.status_code == 200
         assert share.headers.get("cache-control") == "no-cache"
 
+        # A CDN in front (Cloudflare tunnel, say) must not cache any of it
+        # either: an edge-cached app.js survives a hard refresh AND a private
+        # window, since the stale copy is not in the browser at all.
+        for path in ("/", "/js/app.js", "/css/styles.css", "/api/health", "/s/whatever"):
+            headers = client.get(path).headers
+            assert headers.get("cdn-cache-control") == "no-store", path
+            assert headers.get("cloudflare-cdn-cache-control") == "no-store", path
+
         # An unchanged file should then cost a 304 rather than a fresh body.
         first = client.get("/js/app.js")
         again = client.get("/js/app.js", headers={"If-None-Match": first.headers["etag"]})

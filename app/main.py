@@ -136,6 +136,18 @@ async def share_page(token: str) -> FileResponse:
 @app.middleware("http")
 async def security_headers(request: Request, call_next):
     response = await call_next(request)
+
+    # Nothing this app serves should ever sit in a CDN cache. Put it behind a
+    # Cloudflare tunnel and the edge will happily cache .js and .css by
+    # extension, then keep serving the previous version after a self-update -
+    # invisible to a hard refresh or a private window, because the stale copy
+    # is not in the browser at all. These two headers are the standard and the
+    # Cloudflare-specific way to say "edge: do not store", and they are set
+    # separately from Cache-Control so the browser still gets cheap ETag
+    # revalidation rather than no caching at all.
+    response.headers.setdefault("CDN-Cache-Control", "no-store")
+    response.headers.setdefault("Cloudflare-CDN-Cache-Control", "no-store")
+
     response.headers.setdefault("X-Content-Type-Options", "nosniff")
     response.headers.setdefault("X-Frame-Options", "DENY")
     response.headers.setdefault("Referrer-Policy", "same-origin")

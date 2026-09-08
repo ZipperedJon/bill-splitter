@@ -347,6 +347,62 @@ stop the service, copy a snapshot over `data/billsplit.db`, start it again.
 
 Copy `data/` somewhere off the Pi now and then. SD cards die.
 
+## Behind Cloudflare Tunnel / Zero Trust
+
+Two things bite here, and both look like bugs in the app.
+
+**Cloudflare caches your JavaScript at the edge.** It caches `.js` and `.css`
+by extension, so after a self-update the edge can keep handing out the previous
+version. This survives a hard refresh *and* a private window, because the stale
+copy is not in your browser at all. The app now sends `CDN-Cache-Control:
+no-store` and `Cloudflare-CDN-Cache-Control: no-store` on every response, which
+tells the edge not to store anything while still letting the browser do cheap
+ETag revalidation.
+
+Anything cached before you upgraded to 1.2.4 is still at the edge, so **purge it
+once**: Cloudflare dashboard → your domain → Caching → Configuration → *Purge
+Everything*. Belt and braces, add a Cache Rule for the hostname with *Bypass
+cache* so it never depends on the origin headers being honoured.
+
+The quickest way to tell an edge-cache problem from a code problem is to compare
+the tunnel hostname against the Pi directly:
+
+```bash
+curl -s https://bills.example.com/api/health   # through Cloudflare
+curl -s http://localhost:9100/api/health       # on the Pi
+```
+
+Different answers mean the edge is serving something stale, and no amount of
+reinstalling will change it.
+
+**Cloudflare Access will block your share links.** If the whole hostname sits
+behind an Access policy, anyone opening `/s/<token>` gets an Access login screen
+and cannot get in unless they are in your policy - which defeats the point of a
+link you send to friends. Add an Access application with a **Bypass** policy
+(`Everyone`) covering the guest paths:
+
+```
+/s/*            the share page
+/api/share/*    the endpoints it calls
+/js/*  /css/*   the frontend it loads
+/icon.svg  /manifest.webmanifest
+```
+
+Leave `/`, `/api/` and everything else behind Access as normal. The share token
+is the credential for those paths, and they expose exactly one bill - see
+[Share links in detail](#share-links-in-detail).
+
+**Cookies.** Served over HTTPS through the tunnel you can tighten the session
+cookie in `.env`:
+
+```
+BILLSPLIT_COOKIE_SECURE=true
+```
+
+One caveat: a `Secure` cookie is only sent over HTTPS, so this breaks signing in
+via the plain-HTTP LAN address (`http://192.168.x.x:9100`). Set it only if you
+always reach the app through the tunnel.
+
 ## Security
 
 Sign-in is required for everything except the sign-in page itself. Passwords are
