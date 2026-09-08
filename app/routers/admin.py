@@ -8,9 +8,11 @@ what people actually owe each other.
 
 from __future__ import annotations
 
+import re
 import sqlite3
 import time
 from typing import Any
+from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
@@ -364,6 +366,7 @@ EDITABLE_SETTINGS = {
     "default_tip_percent",
     "tip_base",
     "registration_open",
+    "public_base_url",
     "update_repo",
     "update_branch",
     "auto_update_enabled",
@@ -409,6 +412,8 @@ def update_settings(
                 value = str(max(0.0, min(100.0, float(value))))
             except (TypeError, ValueError):
                 raise HTTPException(status.HTTP_400_BAD_REQUEST, f"{key} must be a percentage.")
+        elif key == "public_base_url":
+            value = _normalise_base_url(str(value))
         elif key == "update_repo":
             value = str(value).strip()
             if value and not _looks_like_repo(value):
@@ -421,6 +426,40 @@ def update_settings(
 
     db.audit(conn, actor, "settings.updated", detail=", ".join(sorted(payload)))
     return {"settings": db.get_settings(conn)}
+
+
+# hostname or IPv4, or a bracketed IPv6, with an optional port. No credentials.
+_HOSTPORT_RE = re.compile(
+    r"^(?:[A-Za-z0-9](?:[A-Za-z0-9\-.]*[A-Za-z0-9])?|\[[0-9A-Fa-f:]+\])(?::\d{1,5})?$"
+)
+
+
+def _normalise_base_url(value: str) -> str:
+    """Accept 'bills.example.com', 'https://bills.example.com/' etc.
+
+    Stored as scheme://host[:port] with no trailing slash, because it gets
+    concatenated with '/s/<token>'. A path here would produce a share link that
+    404s, so one is rejected rather than quietly stripped.
+    """
+    text = value.strip()
+    if not text:
+        return ""
+    if "://" not in text:
+        text = "https://" + text          # a bare hostname means https
+    parsed = urlparse(text)
+    if parsed.scheme not in {"http", "https"} or not _HOSTPORT_RE.match(parsed.netloc):
+        # urlparse is happy with nonsense like "https://::::"; being strict here
+        # turns a typo into an error message instead of a share link that 404s.
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "Public address should look like https://bills.example.com",
+        )
+    if parsed.path.strip("/"):
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "Public address should be just the scheme and host, with no path.",
+        )
+    return f"{parsed.scheme}://{parsed.netloc}"
 
 
 def _looks_like_repo(value: str) -> bool:

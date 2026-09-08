@@ -109,10 +109,19 @@ def _share_status(conn: sqlite3.Connection, bill_id: int) -> dict[str, Any]:
         "SELECT COUNT(*) AS n FROM bill_items WHERE bill_id=?", (bill_id,)
     ).fetchone()["n"]
 
+    # The browser builds the link from its own origin, which is right whenever
+    # the admin is already on the address guests will use. It is wrong when they
+    # are on the LAN address and the guests are not, so a configured public
+    # address wins when there is one.
+    public_base = db.get_setting(conn, "public_base_url", "").rstrip("/")
+    path = f"/s/{row['token']}"
+
     return {
         "exists": True,
         "token": row["token"],
-        "path": f"/s/{row['token']}",
+        "path": path,
+        "public_url": f"{public_base}{path}" if public_base else "",
+        "public_base_url": public_base,
         "allow_join": bool(row["allow_join"]),
         "closed": bool(row["closed"]),
         "expires_at": row["expires_at"],

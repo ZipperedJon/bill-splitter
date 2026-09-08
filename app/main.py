@@ -210,7 +210,7 @@ def main() -> None:
         port=config.PORT,
         log_level="info",
         proxy_headers=True,
-        forwarded_allow_ips="*",
+        forwarded_allow_ips=config.TRUSTED_PROXIES,
     )
 
 

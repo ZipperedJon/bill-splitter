@@ -817,6 +817,47 @@ def test_settings_validation_and_repo_normalisation():
     assert r.json()["settings"]["update_check_interval_minutes"] == "5"  # clamped
 
 
+def test_public_base_url_is_normalised_and_used_for_share_links():
+    client = fresh_client()
+    signup_admin(client)
+
+    # A bare hostname is accepted and assumed to be https.
+    r = client.post("/api/admin/settings", json={"public_base_url": "bills.example.com"})
+    assert r.status_code == 200, r.text
+    assert r.json()["settings"]["public_base_url"] == "https://bills.example.com"
+
+    # A trailing slash is trimmed, since '/s/<token>' gets appended.
+    r = client.post("/api/admin/settings", json={"public_base_url": "https://bills.example.com/"})
+    assert r.json()["settings"]["public_base_url"] == "https://bills.example.com"
+
+    # A path would make the share link 404, so it is refused rather than eaten.
+    r = client.post("/api/admin/settings", json={"public_base_url": "https://example.com/bills"})
+    assert r.status_code == 400
+    assert "no path" in r.json()["detail"]
+
+    for bad in ("ftp://example.com", "https://", "::::"):
+        assert client.post(
+            "/api/admin/settings", json={"public_base_url": bad}
+        ).status_code == 400, bad
+
+    # And it flows through to the share link the editor offers.
+    client.post("/api/admin/settings", json={"public_base_url": "https://bills.example.com"})
+    group_id, jon, sam = _two_user_group(client)
+    bill_id = client.post(
+        f"/api/groups/{group_id}/bills",
+        json={"title": "Dinner", "split_mode": "even", "subtotal": "10.00",
+              "participants": [{"party": jon}]},
+    ).json()["bill_id"]
+    share = client.post(f"/api/bills/{bill_id}/share", json={}).json()["share"]
+    assert share["public_url"] == f"https://bills.example.com/s/{share['token']}"
+
+    # Cleared again, the editor falls back to whatever address it is browsing.
+    client.post("/api/admin/settings", json={"public_base_url": ""})
+    share = client.get(f"/api/bills/{bill_id}/share").json()["share"]
+    assert share["public_url"] == ""
+    assert share["path"] == f"/s/{share['token']}"
+
+
 def test_update_token_is_write_only():
     client = fresh_client()
     signup_admin(client)

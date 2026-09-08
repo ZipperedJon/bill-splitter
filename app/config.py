@@ -53,6 +53,12 @@ def _env_int(name: str, default: int) -> int:
 HOST: str = os.environ.get("BILLSPLIT_HOST", "0.0.0.0")
 PORT: int = _env_int("BILLSPLIT_PORT", 9100)
 
+# Whose X-Forwarded-For we believe. A tunnel or reverse proxy on this same box
+# connects from 127.0.0.1, which is the normal case. Trusting everyone ("*")
+# would let anything that can reach the port claim any client IP and so walk
+# past the per-IP sign-in rate limit. Widen it only for a proxy on another host.
+TRUSTED_PROXIES: str = os.environ.get("BILLSPLIT_TRUSTED_PROXIES", "127.0.0.1,::1")
+
 # --- Storage -----------------------------------------------------------------
 DATA_DIR: Path = Path(os.environ.get("BILLSPLIT_DATA_DIR", str(ROOT / "data"))).resolve()
 DB_PATH: Path = DATA_DIR / "billsplit.db"

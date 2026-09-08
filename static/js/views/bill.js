@@ -790,6 +790,17 @@ function paidCard(bill, parties, symbol, currency, fx) {
 
 // --- share link --------------------------------------------------------------
 
+/** Is this hostname only reachable from the local network? */
+function isPrivateHost(hostname) {
+  const host = (hostname || '').toLowerCase();
+  if (host === 'localhost' || host === '127.0.0.1' || host === '::1') return true;
+  if (host.endsWith('.local') || host.endsWith('.lan') || host.endsWith('.home')) return true;
+  if (!host.includes('.')) return true;                    // a bare machine name
+  if (/^10\./.test(host) || /^192\.168\./.test(host)) return true;
+  if (/^172\.(1[6-9]|2\d|3[01])\./.test(host)) return true;
+  return false;
+}
+
 function newBillShareHint() {
   return h('div.card', {},
     h('div.card-head', {}, h('h3', {}, 'Let people pick their own items')),
@@ -871,7 +882,15 @@ async function mountSharePanel(box, billId, bill) {
       return;
     }
 
-    const url = `${location.origin}${share.path}`;
+    // A configured public address beats the address this browser happens to be
+    // on: creating a link from 192.168.x.x and sending it to someone outside
+    // the house would otherwise hand them a URL they cannot open.
+    const localUrl = `${location.origin}${share.path}`;
+    const url = share.public_url || localUrl;
+    const onPrivateAddress = isPrivateHost(location.hostname);
+    const originDiffers = share.public_url
+      && !share.public_url.startsWith(`${location.origin}/`);
+
     const urlField = h('input', { type: 'text', value: url, readonly: true, onclick: (e) => e.target.select() });
     const picked = share.people_who_picked;
     const total = share.people.length;
@@ -901,6 +920,27 @@ async function mountSharePanel(box, billId, bill) {
               },
             }, 'Copy')),
           h('span.hint', {}, 'Anyone with this link can pick and change items. Treat it like the receipt itself.')),
+
+        // Whether the link you are about to copy actually works for the people
+        // you send it to is the one thing worth being loud about.
+        originDiffers
+          ? h('div.notice.info', {},
+              'Using your public address. ',
+              h('a', {
+                href: '#', onclick: (event) => {
+                  event.preventDefault();
+                  urlField.value = localUrl;
+                  urlField.select();
+                },
+              }, 'Show the local address instead'),
+              ' — that one only works on your own network.')
+          : onPrivateAddress && !share.public_url
+            ? h('div.notice.warn', {},
+                'This link points at ', h('strong', {}, location.host),
+                ', which only works on your own network. Set a public address '
+                + 'under ', h('a', { href: '#/admin?tab=settings' }, 'Admin → Settings'),
+                ' and the link will use it.')
+            : null,
 
         h('div.notice', { class: picked ? 'good' : '' },
           share.item_count === 0

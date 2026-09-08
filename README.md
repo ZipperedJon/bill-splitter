@@ -182,6 +182,13 @@ What the person opening it gets, in three taps:
 Their choice of name is remembered in that browser, so coming back to the link
 does not ask again.
 
+**Which address the link uses.** By default it is built from whatever address
+you are browsing from, which is right when that is the address your guests use
+too. If you reach the app on a LAN address but your guests do not, set
+**Admin → Settings → Public address** (e.g. `https://bills.example.com`) and
+links use that instead. The editor says which one it is offering, and warns when
+a link would only work on your own network.
+
 Meanwhile the bill editor shows a live panel: who has picked, how many items
 each, how many times the link has been opened. Toggle **Let people add their own
 name** off to freeze the guest list, or **Close for changes** once everyone has
@@ -333,6 +340,7 @@ path is exercised for real rather than hoped about.
 | `BILLSPLIT_COOKIE_SECURE` | `false` | set `true` behind https |
 | `BILLSPLIT_SESSION_DAYS` | `30` | how long a sign-in lasts |
 | `BILLSPLIT_SERVICE` | `bill-splitter` | systemd unit to restart |
+| `BILLSPLIT_TRUSTED_PROXIES` | `127.0.0.1,::1` | whose `X-Forwarded-For` to believe |
 | `BILLSPLIT_UPDATE_REPO` | — | default update source |
 
 Everything else — currency, default tax and tip, whether sign-ups are open,
@@ -375,7 +383,16 @@ curl -s http://localhost:9100/api/health       # on the Pi
 Different answers mean the edge is serving something stale, and no amount of
 reinstalling will change it.
 
-**Cloudflare Access will block your share links.** If the whole hostname sits
+**Exposed to the internet, tighten two things.** Set a public address under
+Admin → Settings so share links are built from your domain rather than whatever
+address you happen to be browsing from, and turn off "let people request an
+account" once everyone has one - otherwise strangers can queue up requests for
+you to decline. Sign-in attempts are rate limited per IP and username, and the
+app only believes `X-Forwarded-For` from `127.0.0.1` by default (a tunnel on the
+same box), so nothing that can reach the port directly can spoof an IP to get
+around that. Set `BILLSPLIT_TRUSTED_PROXIES` if your proxy runs on another host.
+
+**If you put Cloudflare Access in front, it will block your share links.** If the whole hostname sits
 behind an Access policy, anyone opening `/s/<token>` gets an Access login screen
 and cannot get in unless they are in your policy - which defeats the point of a
 link you send to friends. Add an Access application with a **Bypass** policy

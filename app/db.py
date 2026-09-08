@@ -47,6 +47,10 @@ DEFAULT_SETTINGS = {
     "default_tip_percent": "18",
     "tip_base": "pre_tax",  # pre_tax | post_tax
     "registration_open": "1",  # admins can close signups entirely
+    # The address people outside the house should use, e.g. a Cloudflare tunnel
+    # hostname. Only needed so a share link created while on the LAN address is
+    # still openable by a guest who is not on the LAN.
+    "public_base_url": "",
     "update_repo": config.DEFAULT_UPDATE_REPO,
     "update_branch": config.DEFAULT_UPDATE_BRANCH,
     # Optional GitHub token, only needed to check a private repo. Set through

@@ -44,6 +44,16 @@ export async function renderAdmin(tab = 'users') {
   else mount(body, await usersTab(reload));
 }
 
+/** Is the address this browser is on only reachable from the local network? */
+function isPrivateOrigin() {
+  const host = location.hostname.toLowerCase();
+  if (host === 'localhost' || host === '127.0.0.1' || host === '::1') return true;
+  if (host.endsWith('.local') || host.endsWith('.lan') || host.endsWith('.home')) return true;
+  if (!host.includes('.')) return true;
+  if (/^10\./.test(host) || /^192\.168\./.test(host)) return true;
+  return /^172\.(1[6-9]|2\d|3[01])\./.test(host);
+}
+
 // --- users -------------------------------------------------------------------
 
 const STATUS_BADGE = {
@@ -312,6 +322,10 @@ async function settingsTab(reload) {
     h('option', { value: 'pre_tax', selected: settings.tip_base === 'pre_tax' }, 'Pre-tax subtotal'),
     h('option', { value: 'post_tax', selected: settings.tip_base === 'post_tax' }, 'Subtotal plus tax'));
   const registrationOpen = h('input', { type: 'checkbox', checked: settings.registration_open === '1' });
+  const publicBaseUrl = h('input', {
+    type: 'text', value: settings.public_base_url || '',
+    placeholder: 'https://bills.example.com',
+  });
 
   const save = h('button.btn.btn-primary', { type: 'button' }, 'Save settings');
   save.addEventListener('click', async () => {
@@ -323,6 +337,7 @@ async function settingsTab(reload) {
         default_tip_percent: tipPercent.value || '0',
         tip_base: tipBase.value,
         registration_open: registrationOpen.checked,
+        public_base_url: publicBaseUrl.value,
       });
       toast('Settings saved.', 'ok');
       await refreshSession();
@@ -352,11 +367,41 @@ async function settingsTab(reload) {
     ),
 
     h('div.card', {},
+      h('div.card-head', {}, h('h2', {}, 'Public address')),
+      h('div.card-body.stack', {},
+        h('div.field', {},
+          h('label', {}, 'Address people outside your network use'),
+          h('div.row-tight', {}, publicBaseUrl,
+            h('button.btn.btn-sm', {
+              type: 'button',
+              title: 'Fill in the address this browser is using',
+              onclick: () => { publicBaseUrl.value = location.origin; },
+            }, 'Use current')),
+          h('span.hint', {},
+            'Share links are built from this, so a link you create while on the '
+            + 'LAN address still opens for someone who is not on your network. '
+            + 'Leave it blank to just use whatever address you are browsing from.')),
+        isPrivateOrigin() && !publicBaseUrl.value
+          ? h('div.notice.warn', {},
+              'You are on ', h('strong', {}, location.host),
+              ', a local-network address. Share links made from here will not '
+              + 'open for anyone outside it until you set this.')
+          : null,
+      ),
+      h('div.card-foot', {}, h('div.row', {}, h('div.grow'),
+        h('span.small.faint', {}, 'Saved with the settings below'))),
+    ),
+
+    h('div.card', {},
       h('div.card-head', {}, h('h2', {}, 'Access')),
       h('div.card-body', {},
         h('label.check', {}, registrationOpen,
           h('span', {}, h('strong', {}, 'Let people request an account'),
-            h('div.small.dim', {}, 'Requests still wait for your approval. Turn this off to hide the sign-up form entirely; you can still create accounts by hand.')))),
+            h('div.small.dim', {}, 'Requests still wait for your approval. Turn this off to hide the sign-up form entirely; you can still create accounts by hand.'))),
+        h('p.small.faint', { style: { margin: '10px 0 0' } },
+          'If this app is reachable from the internet, consider turning that off '
+          + 'once everyone has an account — otherwise strangers can queue up '
+          + 'requests for you to decline.')),
     ),
 
     h('div.card', {},
