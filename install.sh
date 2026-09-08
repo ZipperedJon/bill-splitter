@@ -209,7 +209,17 @@ BILLSPLIT_SECRET_KEY=$SECRET
 BILLSPLIT_SERVICE=$SERVICE
 
 # Set this to serve over https behind a reverse proxy.
+# Careful: a Secure cookie is not sent over plain http, so turning this on
+# breaks signing in via the LAN address.
 BILLSPLIT_COOKIE_SECURE=false
+
+# Whose X-Forwarded-For header to believe, so sign-in rate limiting sees real
+# client addresses. 127.0.0.1 covers a tunnel or proxy on this same machine.
+# If cloudflared/nginx runs on another box, put its address here (a subnet like
+# 192.168.1.0/24 also works, at the cost of trusting your whole LAN).
+# Check it with: curl https://your-domain/api/health  -> client_ip should be
+# your own public address, not the proxy's.
+BILLSPLIT_TRUSTED_PROXIES=127.0.0.1,::1
 
 # Where auto-update pulls from. An admin can change this in the UI too.
 BILLSPLIT_UPDATE_REPO=$REPO

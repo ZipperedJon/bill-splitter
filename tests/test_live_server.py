@@ -33,6 +33,7 @@ os.environ["BILLSPLIT_SKIP_BACKGROUND"] = "1"
 import httpx  # noqa: E402
 import uvicorn  # noqa: E402
 
+from app import config as app_config  # noqa: E402
 from app import db, security  # noqa: E402
 from app.main import app  # noqa: E402
 
@@ -58,11 +59,22 @@ def free_port() -> int:
 
 
 class Server:
-    def __init__(self) -> None:
+    def __init__(self, trusted_proxies: str | None = None) -> None:
         self.port = free_port()
         # One worker thread would hide the very bug this file exists to catch;
         # several make the threadpool actually hand work around.
-        config = uvicorn.Config(app, host="127.0.0.1", port=self.port, log_level="warning")
+        #
+        # proxy_headers/forwarded_allow_ips have to be passed exactly as
+        # app.main.main() passes them. Leaving them out made an earlier version
+        # of the proxy test pass on uvicorn's own default rather than on our
+        # configuration, which is not the same thing at all.
+        config = uvicorn.Config(
+            app, host="127.0.0.1", port=self.port, log_level="warning",
+            proxy_headers=True,
+            forwarded_allow_ips=(
+                trusted_proxies if trusted_proxies is not None else app_config.TRUSTED_PROXIES
+            ),
+        )
         self.server = uvicorn.Server(config)
         self.thread = threading.Thread(target=self.server.run, daemon=True)
 
@@ -239,6 +251,35 @@ def test_the_ui_version_matches_the_shipped_version():
 
     with Server() as base, httpx.Client(base_url=base, timeout=15) as client:
         assert client.get("/api/health").json()["version"] == version
+
+
+def test_health_reports_the_client_address_it_sees():
+    """The only way to check BILLSPLIT_TRUSTED_PROXIES took effect. An untrusted
+    caller's X-Forwarded-For must be ignored, or the header would be a free pass
+    around the per-IP sign-in rate limit."""
+    with Server() as base, httpx.Client(base_url=base, timeout=15) as client:
+        seen = client.get("/api/health").json()["client_ip"]
+        assert seen == "127.0.0.1", seen
+
+        # The shipped default trusts 127.0.0.1, and this request *is* from
+        # 127.0.0.1, so the forwarded header is honoured - the tunnel-on-the-
+        # same-box case, where that header is the only source of the real IP.
+        forwarded = client.get(
+            "/api/health", headers={"X-Forwarded-For": "203.0.113.9"}
+        ).json()["client_ip"]
+        assert forwarded == "203.0.113.9", "a trusted proxy's X-Forwarded-For should be used"
+
+    # And the direction that matters for security: an untrusted caller saying
+    # "I am someone else" must be ignored, or the header is a free pass around
+    # the per-IP sign-in rate limit.
+    with Server(trusted_proxies="192.168.10.236") as base, \
+            httpx.Client(base_url=base, timeout=15) as client:
+        ignored = client.get(
+            "/api/health", headers={"X-Forwarded-For": "203.0.113.9"}
+        ).json()["client_ip"]
+        assert ignored == "127.0.0.1", (
+            f"X-Forwarded-For from an untrusted peer must be ignored, got {ignored}"
+        )
 
 
 if __name__ == "__main__":

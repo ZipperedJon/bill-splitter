@@ -5,7 +5,7 @@ from __future__ import annotations
 import sqlite3
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
 
 from .. import config, db, deps, updater
@@ -56,18 +56,24 @@ def me(
 
 
 @router.get("/health")
-def health() -> dict[str, Any]:
+def health(request: Request) -> dict[str, Any]:
     """Public, and deliberately says which code is running.
 
     `curl localhost:9100/api/health` is then enough to answer "did my update
     actually land?" from the Pi itself, without signing in or reading the UI -
     which matters because a browser showing stale cached assets looks exactly
     like an update that never happened.
+
+    `client_ip` is the address this request appears to come from, which is the
+    only way to check that BILLSPLIT_TRUSTED_PROXIES is set correctly: behind a
+    tunnel it should be your own public address, not the proxy's LAN address.
+    It is the caller's own IP and nobody else's.
     """
     return {
         "ok": True,
         "version": config.VERSION,
         "commit": updater.local_commit_short(),
+        "client_ip": request.client.host if request.client else None,
     }
 
 
