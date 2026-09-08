@@ -208,7 +208,15 @@ def test_the_frontend_is_revalidated_so_updates_actually_show_up():
     window and quietly keep serving a stale app.js after an update - which looks
     exactly like the update having done nothing."""
     with Server() as base, httpx.Client(base_url=base, timeout=15) as client:
-        for path in ("/", "/js/app.js", "/js/share.js", "/js/views/bill.js",
+        # The HTML shells are rendered per request (the asset tag is stitched
+        # in), so they have no ETag - a couple of KB, not worth hand-rolling
+        # conditional requests for. Everything served off disk does have one.
+        for path in ("/", "/s/anytoken"):
+            response = client.get(path)
+            assert response.status_code == 200, path
+            assert response.headers.get("cache-control") == "no-cache", path
+
+        for path in ("/js/app.js", "/js/share.js", "/js/views/bill.js",
                      "/css/styles.css", "/manifest.webmanifest"):
             response = client.get(path)
             assert response.status_code == 200, path
@@ -217,11 +225,6 @@ def test_the_frontend_is_revalidated_so_updates_actually_show_up():
                 f"{response.headers.get('cache-control')!r}"
             )
             assert response.headers.get("etag"), f"{path} needs an ETag to revalidate against"
-
-        # The share page is served by its own route; it needs the same treatment.
-        share = client.get("/s/whatever")
-        assert share.status_code == 200
-        assert share.headers.get("cache-control") == "no-cache"
 
         # A CDN in front (Cloudflare tunnel, say) must not cache any of it
         # either: an edge-cached app.js survives a hard refresh AND a private
@@ -251,6 +254,51 @@ def test_the_ui_version_matches_the_shipped_version():
 
     with Server() as base, httpx.Client(base_url=base, timeout=15) as client:
         assert client.get("/api/health").json()["version"] == version
+
+
+def test_asset_urls_carry_a_version_so_no_cache_can_serve_stale_code():
+    """Headers only ask an intermediary to revalidate. A changed URL does not
+    have to ask - which is the difference between "should be fresh" and "cannot
+    possibly be stale". This is what makes an update land through a CDN."""
+    from app.main import ASSET_TAG
+
+    with Server() as base, httpx.Client(base_url=base, timeout=20) as client:
+        page = client.get("/")
+        assert page.status_code == 200
+        assert "__ASSETS__" not in page.text, "the placeholder should be substituted"
+        assert f"/a/{ASSET_TAG}/js/app.js" in page.text
+        assert f"/a/{ASSET_TAG}/css/styles.css" in page.text
+
+        # The share page too - guests are the ones least able to hard-refresh.
+        share_page = client.get("/s/anytoken")
+        assert f"/a/{ASSET_TAG}/js/share.js" in share_page.text
+
+        # The tag must move when the code does, or it buys nothing.
+        assert ASSET_TAG != "", "asset tag must not be empty"
+
+        # Versioned URLs actually serve the file...
+        for asset in (f"/a/{ASSET_TAG}/js/app.js", f"/a/{ASSET_TAG}/js/views/bill.js",
+                      f"/a/{ASSET_TAG}/css/styles.css", f"/a/{ASSET_TAG}/js/share.js"):
+            response = client.get(asset)
+            assert response.status_code == 200, asset
+            assert response.headers.get("cache-control") == "no-cache", asset
+
+        # ...and the whole module graph inherits the tag, because the relative
+        # imports inside resolve against the versioned URL of their importer.
+        app_js = client.get(f"/a/{ASSET_TAG}/js/app.js").text
+        assert "'./api.js'" in app_js or '"./api.js"' in app_js, (
+            "app.js should import relatively, which is what versions its imports"
+        )
+        assert client.get(f"/a/{ASSET_TAG}/js/api.js").status_code == 200
+
+        # An unknown tag still serves, so a page opened before an update keeps
+        # working instead of breaking until someone reloads.
+        assert client.get("/a/1.0.0-oldtag/js/app.js").status_code == 200
+
+        # And it is not a path-traversal hole.
+        for escape in ("/a/t/../../install.sh", "/a/t/..%2f..%2finstall.sh",
+                       "/a/t/../app/config.py"):
+            assert client.get(escape).status_code in (403, 404), escape
 
 
 def test_health_reports_the_client_address_it_sees():

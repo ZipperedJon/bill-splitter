@@ -367,10 +367,20 @@ no-store` and `Cloudflare-CDN-Cache-Control: no-store` on every response, which
 tells the edge not to store anything while still letting the browser do cheap
 ETag revalidation.
 
-Anything cached before you upgraded to 1.2.4 is still at the edge, so **purge it
-once**: Cloudflare dashboard → your domain → Caching → Configuration → *Purge
-Everything*. Belt and braces, add a Cache Rule for the hostname with *Bypass
-cache* so it never depends on the origin headers being honoured.
+From 1.3.0 this no longer depends on anyone honouring those headers. Every
+asset URL carries a version+commit tag (`/a/1.3.0-823dc3c5/js/app.js`), and the
+HTML shell is rendered with the current tag stitched in. A new build therefore
+changes every asset URL, and no cache - browser, CDN or corporate proxy - can
+hand out a stale copy for a URL it has never seen. Headers only *ask* an
+intermediary to revalidate; a changed URL does not have to ask.
+
+Relative imports carry the tag through the whole module graph on their own:
+`/a/<tag>/js/app.js` importing `./api.js` resolves to `/a/<tag>/js/api.js`, so
+one substitution versions everything with no build step.
+
+If you are coming from before 1.2.4, anything already at the edge needs one
+**purge**: Cloudflare dashboard → your domain → Caching → Configuration →
+*Purge Everything*.
 
 The quickest way to tell an edge-cache problem from a code problem is to compare
 the tunnel hostname against the Pi directly:

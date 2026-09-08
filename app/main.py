@@ -15,7 +15,7 @@ import time
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request, status
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import config, db, updater
@@ -117,20 +117,65 @@ app.include_router(bills.router)
 app.include_router(share.router)
 
 
+# --- versioned assets --------------------------------------------------------
+#
+# Every asset URL carries this tag, and it changes whenever the code does. That
+# is what makes an update land no matter what is caching in between: a browser,
+# a CDN or a corporate proxy cannot serve a stale copy for a URL it has never
+# seen. Headers only *ask* an intermediary to revalidate; a new URL does not
+# have to be asked. The commit is in the tag as well as the version because two
+# builds can share a version number while the code differs.
+def _asset_tag() -> str:
+    commit = updater.local_commit_short()
+    return f"{config.VERSION}-{commit}" if commit else config.VERSION
+
+
+ASSET_TAG = _asset_tag()
+NO_CACHE = {"Cache-Control": "no-cache"}
+
+
+def _page(filename: str) -> HTMLResponse:
+    """Serve an HTML shell with the asset tag stitched into its URLs.
+
+    Relative imports do the rest: `/a/<tag>/js/app.js` importing './api.js'
+    resolves to `/a/<tag>/js/api.js` on its own, so one substitution in the
+    shell versions the whole module graph with no build step.
+    """
+    page = STATIC_DIR / filename
+    if not page.is_file():
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"{filename} is missing.")
+    html = page.read_text(encoding="utf-8").replace("__ASSETS__", ASSET_TAG)
+    return HTMLResponse(html, headers=NO_CACHE)
+
+
+@app.get("/", include_in_schema=False)
+async def index() -> HTMLResponse:
+    return _page("index.html")
+
+
 @app.get("/s/{token}", include_in_schema=False)
-async def share_page(token: str) -> FileResponse:
+async def share_page(token: str) -> HTMLResponse:
     """The guest-facing share page.
 
     A real path rather than a #hash route, so the link you paste into a group
     chat looks like a link. The token is not read here - share.js pulls it from
     the URL and calls /api/share/{token}, which is where it is validated.
     """
-    page = STATIC_DIR / "share.html"
-    if not page.is_file():
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Share page missing.")
-    return FileResponse(
-        page, media_type="text/html", headers={"Cache-Control": "no-cache"}
-    )
+    return _page("share.html")
+
+
+@app.get("/a/{tag}/{asset_path:path}", include_in_schema=False)
+async def versioned_asset(tag: str, asset_path: str) -> FileResponse:
+    """Serve a static file under any tag. The tag is only a cache key - it is
+    not checked, so an old page requesting an old tag still works rather than
+    breaking until the person reloads."""
+    root = STATIC_DIR.resolve()
+    target = (root / asset_path).resolve()
+    # Containment check before touching the filesystem: '..' in the path must
+    # not reach outside static/.
+    if not target.is_relative_to(root) or not target.is_file():
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Not found.")
+    return FileResponse(target, headers=NO_CACHE)
 
 
 @app.middleware("http")
