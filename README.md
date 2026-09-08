@@ -175,9 +175,10 @@ install.sh       the one-script installer
 ## Tests
 
 ```bash
-python tests/test_splitter.py       # the split engine (unit)
+python tests/test_splitter.py       # the split engine (unit, incl. a 400-bill fuzz)
 python tests/test_api.py            # the whole API against a temp database
 python tests/test_live_server.py    # a real uvicorn server, real HTTP, concurrency
+python tests/test_updater.py        # update, roll back, refuse-when-dirty
 ```
 
 Or all at once with `python -m pytest tests -q` if you have pytest.
@@ -186,6 +187,10 @@ The live-server tests exist for a reason: `TestClient` drives the app through a
 single thread and happily passed a build where every request failed in
 production, because FastAPI resumes a sync dependency's cleanup on a *different*
 threadpool thread than the one that opened the SQLite connection.
+
+`test_updater.py` builds a throwaway git repo, pushes a deliberately broken
+commit to it, and asserts the app rolls back and still serves — so the rollback
+path is exercised for real rather than hoped about.
 
 ## Configuration
 

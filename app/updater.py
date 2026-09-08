@@ -308,6 +308,11 @@ def apply_update(
         raise UpdateError("An update is already running.")
     _in_progress = True
     log_id: int | None = None
+    # Set once a final status has been written, so the catch-all handlers below
+    # cannot overwrite a precise outcome (a successful "rolled-back") with a
+    # vague "failed" as the exception unwinds. Which one the admin sees is the
+    # difference between "the app healed itself" and "I need to go fix the Pi".
+    logged = False
     from_commit = local_commit()
 
     try:
@@ -338,6 +343,7 @@ def apply_update(
         target = _git("rev-parse", "FETCH_HEAD")
         if target == from_commit:
             _log_finish(conn, log_id, "no-op", "Already up to date.", target, config.VERSION)
+            logged = True
             return {"status": "no-op", "message": "Already up to date.", "commit": target}
 
         requirements_changed = bool(
@@ -364,6 +370,7 @@ def apply_update(
                 f"{exc}{rollback_note} Stayed on {from_commit[:8]}.",
                 from_commit, config.VERSION,
             )
+            logged = True
             db.audit(conn, None, "update.rolled_back", detail=str(exc)[:400])
             conn.commit()
             raise UpdateError(f"Update rolled back: {exc}") from exc
@@ -376,6 +383,7 @@ def apply_update(
             conn, log_id, "success",
             f"Updated {from_commit[:8]} -> {target[:8]}.", target, new_version,
         )
+        logged = True
         db.audit(
             conn, None, "update.applied",
             detail=f"{from_commit[:8]} -> {target[:8]} (v{config.VERSION} -> v{new_version}) "
@@ -404,14 +412,14 @@ def apply_update(
         }
 
     except UpdateError as exc:
-        if log_id is not None:
+        if log_id is not None and not logged:
             try:
                 _log_finish(conn, log_id, "failed", str(exc), "", config.VERSION)
             except sqlite3.Error:
                 pass
         raise
     except (OSError, subprocess.SubprocessError) as exc:
-        if log_id is not None:
+        if log_id is not None and not logged:
             try:
                 _log_finish(conn, log_id, "failed", f"{exc.__class__.__name__}: {exc}", "", config.VERSION)
             except sqlite3.Error:

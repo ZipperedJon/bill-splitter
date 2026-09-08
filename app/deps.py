@@ -69,7 +69,3 @@ def require_group_access(
                 status.HTTP_403_FORBIDDEN, "Only the group owner or an admin can do that."
             )
     return group
-
-
-def audit(conn: sqlite3.Connection, actor: Any, action: str, target: str = "", detail: str = "") -> None:
-    db.audit(conn, actor, action, target, detail)

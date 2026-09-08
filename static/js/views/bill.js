@@ -170,8 +170,6 @@ function blankBill(group, parties) {
 
 function fromApi(detail) {
   const b = detail.bill;
-  const shares = {};
-  for (const item of detail.items) shares[item.id] = item.shares;
   return {
     title: b.title,
     category_id: b.category_id,
