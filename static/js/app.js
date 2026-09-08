@@ -9,6 +9,12 @@ import { renderBillEditor } from './views/bill.js';
 import { renderAdmin } from './views/admin.js';
 import { renderAccount } from './views/account.js';
 
+// The version this JavaScript was shipped with. Compared against what the
+// server reports, so a browser holding a cached copy of the frontend from
+// before an update says so instead of silently looking like the update did
+// nothing. Kept in step with the VERSION file by a test.
+export const UI_VERSION = '1.2.3';
+
 export const state = {
   user: null,
   defaults: { currency: 'USD', tax_percent: '0', tip_percent: '18', tip_base: 'pre_tax' },
@@ -154,8 +160,37 @@ export async function refreshSession() {
       state.bootstrap = null;
     }
   }
+  checkStaleAssets();
   renderChrome();
   return state.user;
+}
+
+/** Warn (once) when this cached frontend is older than the running server. */
+function checkStaleAssets() {
+  if (!state.version || state.version === UI_VERSION) return;
+  if (document.getElementById('stale-banner')) return;
+
+  const reload = h('button.btn.btn-sm.btn-primary', {
+    type: 'button',
+    onclick: () => {
+      // Bypass the cache for the document; the assets follow with no-cache.
+      const url = new URL(location.href);
+      url.searchParams.set('_r', Date.now().toString());
+      location.replace(url.toString());
+    },
+  }, 'Reload now');
+
+  document.body.prepend(h('div.notice.warn', {
+    id: 'stale-banner',
+    style: {
+      margin: '0', borderRadius: '0', display: 'flex', alignItems: 'center',
+      gap: '10px', flexWrap: 'wrap', justifyContent: 'center',
+    },
+  },
+    h('span', {}, `This page is running v${UI_VERSION} but the server is on `
+      + `v${state.version}. Your browser cached an older copy of the app.`),
+    reload,
+  ));
 }
 
 // --- router ------------------------------------------------------------------

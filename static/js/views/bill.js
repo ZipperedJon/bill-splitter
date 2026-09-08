@@ -410,6 +410,22 @@ function subtotalCard(bill, symbol, fx) {
             oninput: (event) => { bill.subtotal = event.target.value; fx.preview(); },
           })),
         h('span.hint', {}, 'The amount on the receipt before extras. Add tax and tip below.')),
+
+      // Per-item features only exist once there are items, and nothing up to
+      // this point says so - which makes them look missing rather than
+      // inapplicable. Point at the switch instead.
+      h('div.notice', { style: { marginTop: '4px' } },
+        'Want to enter each line, add modifications like "extra bacon", or '
+        + 'divide one line into portions? Set ',
+        h('strong', {}, 'How to split'), ' to ', h('strong', {}, 'Itemized'), ' above. ',
+        h('a', {
+          href: '#', onclick: (event) => {
+            event.preventDefault();
+            bill.split_mode = 'itemized';
+            if (!bill.items.length) bill.items = [newItem()];
+            fx.rerender('item-label-0');
+          },
+        }, 'Switch now')),
     ),
   );
 }

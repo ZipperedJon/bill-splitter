@@ -217,6 +217,22 @@ def test_the_frontend_is_revalidated_so_updates_actually_show_up():
         assert again.status_code == 304, "revalidation should be cheap, not a full re-download"
 
 
+def test_the_ui_version_matches_the_shipped_version():
+    """app.js carries its own version so a stale cached frontend can announce
+    itself. If it drifts from VERSION the warning fires on every load (or never
+    fires at all), so the two are pinned together here rather than by memory."""
+    version = (open(os.path.join(ROOT, "VERSION"), encoding="utf-8").read().strip())
+    app_js = open(os.path.join(ROOT, "static", "js", "app.js"), encoding="utf-8").read()
+    expected = f"UI_VERSION = '{version}'"
+    assert expected in app_js, (
+        f"static/js/app.js should declare {expected} to match the VERSION file. "
+        "Bump both together."
+    )
+
+    with Server() as base, httpx.Client(base_url=base, timeout=15) as client:
+        assert client.get("/api/health").json()["version"] == version
+
+
 if __name__ == "__main__":
     failures = 0
     for name in sorted(n for n in list(globals()) if n.startswith("test_")):
