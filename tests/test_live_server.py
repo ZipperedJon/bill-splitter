@@ -190,6 +190,33 @@ def test_static_assets_are_served():
         assert index.headers.get("x-content-type-options") == "nosniff"
 
 
+def test_the_frontend_is_revalidated_so_updates_actually_show_up():
+    """The app updates itself, so a browser must never reuse the old frontend
+    without asking. Without Cache-Control, browsers invent their own freshness
+    window and quietly keep serving a stale app.js after an update - which looks
+    exactly like the update having done nothing."""
+    with Server() as base, httpx.Client(base_url=base, timeout=15) as client:
+        for path in ("/", "/js/app.js", "/js/share.js", "/js/views/bill.js",
+                     "/css/styles.css", "/manifest.webmanifest"):
+            response = client.get(path)
+            assert response.status_code == 200, path
+            assert response.headers.get("cache-control") == "no-cache", (
+                f"{path} must be revalidated, got "
+                f"{response.headers.get('cache-control')!r}"
+            )
+            assert response.headers.get("etag"), f"{path} needs an ETag to revalidate against"
+
+        # The share page is served by its own route; it needs the same treatment.
+        share = client.get("/s/whatever")
+        assert share.status_code == 200
+        assert share.headers.get("cache-control") == "no-cache"
+
+        # An unchanged file should then cost a 304 rather than a fresh body.
+        first = client.get("/js/app.js")
+        again = client.get("/js/app.js", headers={"If-None-Match": first.headers["etag"]})
+        assert again.status_code == 304, "revalidation should be cheap, not a full re-download"
+
+
 if __name__ == "__main__":
     failures = 0
     for name in sorted(n for n in list(globals()) if n.startswith("test_")):

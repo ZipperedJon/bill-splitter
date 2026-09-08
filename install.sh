@@ -81,21 +81,45 @@ PY_VERSION="$("$PYTHON" -c 'import sys; print("%d.%d" % sys.version_info[:2])')"
 ok "git and Python $PY_VERSION"
 
 # --- 2. code -----------------------------------------------------------------
+
+# Bring a checkout up to date with its remote. Re-running this script is the
+# documented way to upgrade, so it has to actually fetch - skipping the pull
+# would reinstall the same code and look like the upgrade did nothing.
+pull_latest() {
+  local dir="$1" before after
+  git -C "$dir" remote get-url origin >/dev/null 2>&1 || {
+    info "No git remote here, so nothing to pull."
+    return 0
+  }
+  before="$(git -C "$dir" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+  if ! git -C "$dir" fetch --prune origin "$BRANCH" 2>/dev/null; then
+    warn "Could not reach the remote; carrying on with the code already here."
+    return 0
+  fi
+  if [ -n "$(git -C "$dir" status --porcelain --untracked-files=no)" ]; then
+    warn "Local edits found; leaving them alone and not resetting the code."
+    info "Commit or discard them, then re-run, to pick up the latest version."
+    return 0
+  fi
+  git -C "$dir" reset --hard "origin/$BRANCH" >/dev/null
+  after="$(git -C "$dir" rev-parse --short HEAD)"
+  if [ "$before" = "$after" ]; then
+    ok "Already up to date ($after)"
+  else
+    ok "Updated $before -> $after"
+  fi
+}
+
 # Running from inside a checkout? Use it. Otherwise clone.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd || true)"
 if [ -n "$SCRIPT_DIR" ] && [ -f "$SCRIPT_DIR/app/main.py" ]; then
   INSTALL_DIR="$SCRIPT_DIR"
   say "Installing from this checkout"
   info "$INSTALL_DIR"
+  [ -d "$INSTALL_DIR/.git" ] && pull_latest "$INSTALL_DIR"
 elif [ -d "$INSTALL_DIR/.git" ]; then
   say "Updating the existing install"
-  git -C "$INSTALL_DIR" fetch --prune origin "$BRANCH"
-  if [ -n "$(git -C "$INSTALL_DIR" status --porcelain --untracked-files=no)" ]; then
-    warn "Local changes found; leaving them alone and not resetting the code."
-  else
-    git -C "$INSTALL_DIR" reset --hard "origin/$BRANCH"
-    ok "Updated to $(git -C "$INSTALL_DIR" rev-parse --short HEAD)"
-  fi
+  pull_latest "$INSTALL_DIR"
 else
   [ -z "$REPO" ] && die \
 "No repository configured. Either run this script from a checkout, or set the repo:

@@ -20,7 +20,22 @@ starts it. Then open `http://<your-pi>:9100`.
 **The first account created becomes the admin.** Nobody else can sign in until
 that admin approves them.
 
-Re-running the installer upgrades in place and never touches your database.
+## Updating
+
+Either press **Update now** in Admin → Updates, or on the Pi:
+
+```bash
+cd ~/bill-splitter && ./install.sh
+```
+
+Re-running the installer fetches the latest code, installs any new
+dependencies, migrates the database in place and restarts the service. It never
+touches your data, and it refuses to overwrite files you have edited locally.
+
+Auto-update is **off** by default: until you turn it on (Admin → Updates) or
+press the button, the app stays on the version you installed. It still checks
+hourly and tells you when something is waiting.
+
 `./install.sh --uninstall` removes the service and leaves your data alone.
 
 <details>

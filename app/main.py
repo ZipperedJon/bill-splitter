@@ -125,7 +125,9 @@ async def share_page(token: str) -> FileResponse:
     page = STATIC_DIR / "share.html"
     if not page.is_file():
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Share page missing.")
-    return FileResponse(page, media_type="text/html")
+    return FileResponse(
+        page, media_type="text/html", headers={"Cache-Control": "no-cache"}
+    )
 
 
 @app.middleware("http")
@@ -150,9 +152,33 @@ async def internal_error(request: Request, exc: Exception) -> JSONResponse:
     return JSONResponse({"detail": "Something went wrong on the server."}, status_code=500)
 
 
+class AppStatic(StaticFiles):
+    """StaticFiles that makes browsers revalidate the frontend.
+
+    Starlette sends ETag and Last-Modified but no Cache-Control, which leaves
+    browsers to guess how long a file stays fresh - typically a tenth of its
+    age - and reuse it without asking. In an app that updates itself that is a
+    trap: the new code lands on disk, the browser keeps running the old app.js,
+    and the update looks like it did nothing.
+
+    `no-cache` does not mean "do not cache", it means "ask before reusing". The
+    ETag is already there, so an unchanged file costs a 304 with no body - on a
+    LAN that is nearly free, and the page is never stale after an update.
+
+    Applied to everything rather than a list of extensions: static/ holds only
+    frontend code that has to move in step with the app, and matching on paths
+    is needlessly brittle (a request for "/" arrives here as ".").
+    """
+
+    async def get_response(self, path: str, scope):
+        response = await super().get_response(path, scope)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
+
+
 if STATIC_DIR.is_dir():
     # Mounted last so /api/* always wins.
-    app.mount("/", StaticFiles(directory=str(STATIC_DIR), html=True), name="static")
+    app.mount("/", AppStatic(directory=str(STATIC_DIR), html=True), name="static")
 
 
 def main() -> None:
