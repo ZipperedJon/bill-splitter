@@ -5,7 +5,7 @@
 import { api } from '../api.js';
 import {
   $, add, centsToInput, clear, confirmDialog, h, initials, money, moneyAbs,
-  debounce, mount, pctLabel, toast, today,
+  debounce, mount, pctLabel, relTime, toast, today,
 } from '../util.js';
 import { go, state } from '../app.js';
 import { currencySymbol, promptDialog } from './groups.js';
@@ -23,15 +23,17 @@ export async function renderBillEditor({ groupId, billId }) {
   let bill;
   let group;
   let parties;
+  // The revision we loaded. Sent back on save so the server can refuse a write
+  // that would clobber picks made through the share link meanwhile.
+  let loadedRevision = null;
 
   if (billId) {
     const detail = await api.bill(billId);
-    group = { id: detail.bill.group_id, currency: detail.bill.currency };
-    parties = detail.parties;
-    bill = fromApi(detail);
     const full = await api.group(detail.bill.group_id);
     group = full.group;
     parties = full.parties;
+    bill = fromApi(detail);
+    loadedRevision = detail.bill.revision;
   } else {
     const full = await api.group(groupId);
     group = full.group;
@@ -67,8 +69,10 @@ export async function renderBillEditor({ groupId, billId }) {
     rerender: () => { redrawBody(); runPreview(); },
   };
 
+  const shareBox = h('div.stack');
+
   const redrawBody = () => {
-    mount(bodyBox, 
+    mount(bodyBox,
       detailsCard(bill, categories, group, fx),
       peopleCard(bill, parties, fx),
       bill.split_mode === 'itemized'
@@ -77,10 +81,12 @@ export async function renderBillEditor({ groupId, billId }) {
       chargesCard(bill, symbol, fx),
       extrasCard(bill, symbol, fx),
       paidCard(bill, parties, symbol, currency, fx),
+      billId ? shareBox : newBillShareHint(),
     );
   };
   redrawBody();
   runPreview();
+  if (billId) mountSharePanel(shareBox, billId, bill);
 
   const saveButton = h('button.btn.btn-primary', { type: 'button' }, billId ? 'Save changes' : 'Save bill');
   saveButton.addEventListener('click', async () => {
@@ -90,18 +96,28 @@ export async function renderBillEditor({ groupId, billId }) {
     const label = saveButton.textContent;
     saveButton.textContent = 'Saving…';
     try {
-      const payload = toApi(bill);
       if (billId) {
-        await api.updateBill(billId, payload);
+        await api.updateBill(billId, { ...toApi(bill), expected_revision: loadedRevision });
         toast('Bill saved.', 'ok');
         go(`#/g/${group.id}`);
       } else {
-        await api.createBill(group.id, payload);
+        await api.createBill(group.id, toApi(bill));
         toast('Bill added.', 'ok');
         go(`#/g/${group.id}`);
       }
     } catch (error) {
-      toast(error.message, 'err');
+      if (error.status === 409) {
+        // Someone picked their items through the share link while this was
+        // open. Offer the reload rather than letting them stomp it.
+        const reload = await confirmDialog({
+          title: 'This bill changed',
+          message: error.message,
+          confirmLabel: 'Reload the bill',
+        });
+        if (reload) return go(`#/b/${billId}`);
+      } else {
+        toast(error.message, 'err');
+      }
     } finally {
       saveButton.disabled = false;
       saveButton.textContent = label;
@@ -561,6 +577,205 @@ function paidCard(bill, parties, symbol, currency, fx) {
         'Usually one person covers the whole thing. Leave the rest blank — the balances work it out.'),
     ),
   );
+}
+
+// --- share link --------------------------------------------------------------
+
+function newBillShareHint() {
+  return h('div.card', {},
+    h('div.card-head', {}, h('h3', {}, 'Let people pick their own items')),
+    h('div.card-body.small.dim', {},
+      'Save the bill first, then you can generate a link to send round. '
+      + 'Whoever opens it says who they are and ticks what they had.'),
+  );
+}
+
+/** Owner-side controls, loaded into `box` once the bill exists. */
+async function mountSharePanel(box, billId, bill) {
+  let share = null;
+  let poller = null;
+
+  const load = async () => {
+    try {
+      share = (await api.share(billId)).share;
+    } catch {
+      share = { exists: false };
+    }
+    draw();
+  };
+
+  // While the link is open, keep the "who has picked" line current so the
+  // owner can watch selections arrive from across the table.
+  const startPolling = () => {
+    stopPolling();
+    poller = setInterval(async () => {
+      // Stop once this editor is off-screen; the router replaced the view.
+      if (!box.isConnected) return stopPolling();
+      if (document.visibilityState !== 'visible') return;
+      try {
+        const next = (await api.share(billId)).share;
+        const changed = next.exists && share && share.exists
+          && (next.people_who_picked !== share.people_who_picked
+            || next.people.length !== share.people.length
+            || next.views !== share.views);
+        share = next;
+        if (changed) draw();
+      } catch { /* transient; try again next tick */ }
+    }, 8000);
+  };
+  const stopPolling = () => {
+    if (poller) clearInterval(poller);
+    poller = null;
+  };
+
+  const act = async (fn, message) => {
+    try {
+      share = (await fn()).share;
+      if (message) toast(message, 'ok');
+      draw();
+    } catch (error) {
+      toast(error.message, 'err');
+    }
+  };
+
+  const draw = () => {
+    if (!share || !share.exists) {
+      mount(box, h('div.card', {},
+        h('div.card-head', {}, h('h3', {}, 'Let people pick their own items')),
+        h('div.card-body.stack', {},
+          h('p.small.dim', { style: { margin: 0 } },
+            'Generate a link to send round. Whoever opens it chooses their name '
+            + 'from the people on this bill — or adds their own — then ticks what '
+            + 'they had. No account needed.'),
+          bill.split_mode !== 'itemized'
+            ? h('div.notice', {},
+                'Heads up: this bill is not itemized, so there is nothing for people '
+                + 'to tick. They can still add themselves and see their share. Set '
+                + '"How to split" to Itemized if you want them choosing items.')
+            : null,
+          h('button.btn.btn-primary', {
+            type: 'button',
+            onclick: () => act(() => api.createShare(billId, { allow_join: true }), 'Link created.'),
+          }, 'Create a share link')),
+      ));
+      stopPolling();
+      return;
+    }
+
+    const url = `${location.origin}${share.path}`;
+    const urlField = h('input', { type: 'text', value: url, readonly: true, onclick: (e) => e.target.select() });
+    const picked = share.people_who_picked;
+    const total = share.people.length;
+
+    mount(box, h('div.card', {},
+      h('div.card-head', {},
+        h('h3', {}, 'Share link'),
+        share.closed
+          ? h('span.badge.warn.right', {}, 'closed')
+          : h('span.badge.pos.right', {}, 'open')),
+      h('div.card-body.stack', {},
+        h('div.field', {},
+          h('label', {}, 'Send this to everyone on the bill'),
+          h('div.row-tight', {}, urlField,
+            h('button.btn.btn-sm', {
+              type: 'button',
+              onclick: async (event) => {
+                const button = event.currentTarget;
+                try {
+                  await navigator.clipboard.writeText(url);
+                  button.textContent = 'Copied';
+                  setTimeout(() => { button.textContent = 'Copy'; }, 1600);
+                } catch {
+                  urlField.select();
+                  toast('Press Ctrl+C to copy the selected link.');
+                }
+              },
+            }, 'Copy')),
+          h('span.hint', {}, 'Anyone with this link can pick and change items. Treat it like the receipt itself.')),
+
+        h('div.notice', { class: picked ? 'good' : '' },
+          share.item_count === 0
+            ? 'No items on this bill yet, so there is nothing to tick.'
+            : picked === 0
+              ? `Nobody has picked yet — ${total} ${total === 1 ? 'person is' : 'people are'} on the bill.`
+              : `${picked} of ${total} ${picked === 1 ? 'person has' : 'people have'} picked their items.`),
+
+        share.people.length ? h('div.stack-sm', {},
+          h('div.section-title', {}, 'Who has picked'),
+          ...share.people.map((person) => h('div.spread', {},
+            h('span.small', {}, person.name),
+            person.claimed_items
+              ? h('span.badge.pos', {}, `${person.claimed_items} item${person.claimed_items === 1 ? '' : 's'}`)
+              : h('span.badge', {}, 'nothing yet'))),
+        ) : null,
+
+        h('label.check', {},
+          h('input', {
+            type: 'checkbox', checked: share.allow_join,
+            onchange: (event) => act(
+              () => api.updateShare(billId, { allow_join: event.target.checked }),
+              event.target.checked ? 'People can add themselves.' : 'Adding new people turned off.',
+            ),
+          }),
+          h('span', {}, h('strong', {}, 'Let people add their own name'),
+            h('div.small.dim', {}, 'For anyone who is not already on the bill.'))),
+
+        h('label.check', {},
+          h('input', {
+            type: 'checkbox', checked: share.closed,
+            onchange: (event) => act(
+              () => api.updateShare(billId, { closed: event.target.checked }),
+              event.target.checked ? 'Link closed for changes.' : 'Link reopened.',
+            ),
+          }),
+          h('span', {}, h('strong', {}, 'Close for changes'),
+            h('div.small.dim', {}, 'People can still see the bill, but not change their picks. '
+              + 'Do this once everyone has answered.'))),
+
+        h('p.tiny.faint', { style: { margin: 0 } },
+          share.views
+            ? `Opened ${share.views} time${share.views === 1 ? '' : 's'}`
+              + (share.last_seen_at ? `, last ${relTime(share.last_seen_at)}` : '')
+            : 'Not opened yet.'),
+      ),
+      h('div.card-foot', {}, h('div.row', {},
+        h('button.btn.btn-sm', {
+          type: 'button',
+          onclick: () => go(`#/b/${billId}`),
+        }, 'Reload picks'),
+        h('div.grow'),
+        h('button.btn.btn-sm', {
+          type: 'button',
+          onclick: async () => {
+            if (!await confirmDialog({
+              title: 'Replace the link?',
+              message: 'A new link is generated and the old one stops working. '
+                + 'Anyone you already sent it to will need the new one. Picks already made are kept.',
+              confirmLabel: 'Replace link', danger: true,
+            })) return;
+            act(() => api.rotateShare(billId), 'New link generated.');
+          },
+        }, 'Replace'),
+        h('button.btn.btn-sm.btn-danger-quiet', {
+          type: 'button',
+          onclick: async () => {
+            if (!await confirmDialog({
+              title: 'Delete the link?',
+              message: 'The link stops working for everyone. Items people already '
+                + 'picked stay on the bill.',
+              confirmLabel: 'Delete link', danger: true,
+            })) return;
+            act(() => api.revokeShare(billId), 'Link deleted.');
+          },
+        }, 'Delete'))),
+    ));
+
+    if (!share.closed) startPolling();
+    else stopPolling();
+  };
+
+  mount(box, h('div.card.card-pad.center', {}, h('span.spin-inline')));
+  await load();
 }
 
 // --- preview -----------------------------------------------------------------

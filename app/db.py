@@ -24,7 +24,7 @@ from typing import Any, Iterator
 
 from . import config
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 3
 
 DEFAULT_CATEGORIES = [
     ("Food & Restaurant", "restaurant", 10),
@@ -161,7 +161,12 @@ CREATE TABLE IF NOT EXISTS bills (
 
     created_by      INTEGER REFERENCES users(id) ON DELETE SET NULL,
     created_at      INTEGER NOT NULL,
-    updated_at      INTEGER NOT NULL
+    updated_at      INTEGER NOT NULL,
+    -- Bumped on every write. Used for optimistic concurrency when the owner is
+    -- editing a bill while people tick items through a share link. updated_at
+    -- cannot do this job: it has one-second resolution, so two writes in the
+    -- same second look identical and a stale save would slip through.
+    revision        INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_bills_group ON bills(group_id, bill_date DESC);
 
@@ -208,6 +213,27 @@ CREATE TABLE IF NOT EXISTS bill_payments (
     amount_cents INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_payments_bill ON bill_payments(bill_id);
+
+-- A share link for one bill. The token is the whole credential: anyone holding
+-- it can pick who they are on that bill and tick what they had, without an
+-- account. Stored in the clear so the owner can re-copy the link; rotate or
+-- revoke to invalidate.
+CREATE TABLE IF NOT EXISTS bill_shares (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    bill_id      INTEGER NOT NULL REFERENCES bills(id) ON DELETE CASCADE,
+    token        TEXT NOT NULL,
+    allow_join   INTEGER NOT NULL DEFAULT 1,   -- may a newcomer add their own name?
+    closed       INTEGER NOT NULL DEFAULT 0,   -- read-only but still viewable
+    expires_at   INTEGER,                      -- NULL = never
+    views        INTEGER NOT NULL DEFAULT 0,
+    last_seen_at INTEGER,
+    created_by   INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    created_at   INTEGER NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_shares_token ON bill_shares(token);
+-- One live link per bill: rotating replaces it rather than piling up tokens
+-- that all still work.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_shares_bill ON bill_shares(bill_id);
 
 CREATE TABLE IF NOT EXISTS settlements (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -316,14 +342,34 @@ def init_db() -> None:
             )
 
 
+def _has_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
+    return any(row["name"] == column for row in conn.execute(f"PRAGMA table_info({table})"))
+
+
 def _migrate(conn: sqlite3.Connection, from_version: int) -> None:
     """Apply forward migrations. Each step bumps meta.schema_version.
 
-    Future releases add branches here; the updater calls init_db() on boot so
-    a `git pull` that ships a schema change migrates itself.
+    init_db() runs the whole SCHEMA first, and every statement in it is
+    CREATE ... IF NOT EXISTS - so a release that only *adds* a table or index
+    needs nothing here beyond recording the bump. Steps that change an existing
+    table (ALTER TABLE, backfills) go here.
+
+    The updater calls init_db() after pulling, so a `git pull` that ships a
+    schema change migrates itself before the new code serves a request.
     """
     version = from_version
-    # (no migrations past v1 yet)
+
+    if version < 2:
+        # v2 added bill_shares; SCHEMA's CREATE TABLE IF NOT EXISTS handled it.
+        version = 2
+
+    if version < 3:
+        # v3 added bills.revision. A new column on an existing table does need
+        # doing by hand - CREATE TABLE IF NOT EXISTS leaves the old table alone.
+        if not _has_column(conn, "bills", "revision"):
+            conn.execute("ALTER TABLE bills ADD COLUMN revision INTEGER NOT NULL DEFAULT 0")
+        version = 3
+
     if version != from_version:
         conn.execute("UPDATE meta SET value=? WHERE key='schema_version'", (str(version),))
 

@@ -14,12 +14,12 @@ import os
 import time
 from typing import Any
 
-from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, HTTPException, Request, status
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import config, db, updater
-from .routers import admin, auth, bills, groups, system
+from .routers import admin, auth, bills, groups, share, system
 
 log = logging.getLogger("billsplit")
 
@@ -111,6 +111,21 @@ app.include_router(auth.router)
 app.include_router(admin.router)
 app.include_router(groups.router)
 app.include_router(bills.router)
+app.include_router(share.router)
+
+
+@app.get("/s/{token}", include_in_schema=False)
+async def share_page(token: str) -> FileResponse:
+    """The guest-facing share page.
+
+    A real path rather than a #hash route, so the link you paste into a group
+    chat looks like a link. The token is not read here - share.js pulls it from
+    the URL and calls /api/share/{token}, which is where it is validated.
+    """
+    page = STATIC_DIR / "share.html"
+    if not page.is_file():
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Share page missing.")
+    return FileResponse(page, media_type="text/html")
 
 
 @app.middleware("http")

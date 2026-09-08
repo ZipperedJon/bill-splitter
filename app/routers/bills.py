@@ -72,6 +72,10 @@ class BillIn(BaseModel):
     items: list[ItemIn] = Field(default_factory=list)
     participants: list[ParticipantIn] = Field(default_factory=list)
     payments: list[PaymentIn] = Field(default_factory=list)
+    # Optimistic concurrency. The editor sends the revision it loaded; if the
+    # bill has moved since (someone ticked their items through a share link),
+    # the save is refused instead of quietly wiping their selections.
+    expected_revision: int | None = None
 
 
 def _money(value: Any, what: str) -> int:
@@ -151,7 +155,7 @@ def _write_bill(
                             discount_mode=?, discount_percent=?, discount_cents=?,
                             tax_mode=?, tax_percent=?, tax_cents=?,
                             tip_mode=?, tip_percent=?, tip_cents=?, tip_base=?,
-                            updated_at=?
+                            updated_at=?, revision=revision+1
                       WHERE id=?""",
         (
             payload.title.strip(),
@@ -301,6 +305,14 @@ def update_bill(
     if row is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Bill not found.")
     group = deps.require_group_access(conn, row["group_id"], user)
+
+    if payload.expected_revision is not None and payload.expected_revision != row["revision"]:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "This bill changed while you had it open - someone picked their items "
+            "through the share link. Reload to see their choices, then save again.",
+        )
+
     parties = ledger.group_parties(conn, row["group_id"])
     _validate(payload, parties)
 

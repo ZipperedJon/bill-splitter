@@ -111,6 +111,13 @@ export const api = {
   deleteBill: (id) => del(`/api/bills/${id}`),
   preview: (data) => post('/api/bills/preview', data),
 
+  // share links
+  share: (billId) => get(`/api/bills/${billId}/share`),
+  createShare: (billId, data) => post(`/api/bills/${billId}/share`, data),
+  updateShare: (billId, data) => request('PATCH', `/api/bills/${billId}/share`, data),
+  rotateShare: (billId) => post(`/api/bills/${billId}/share/rotate`),
+  revokeShare: (billId) => del(`/api/bills/${billId}/share`),
+
   // admin
   users: () => get('/api/admin/users'),
   approveUser: (id, data) => post(`/api/admin/users/${id}/approve`, data),

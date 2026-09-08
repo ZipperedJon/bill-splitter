@@ -170,6 +170,13 @@ Description=Bill Splitter - split costs with your group
 Documentation=https://github.com/$REPO
 After=network-online.target
 Wants=network-online.target
+# These two live in [Unit], not [Service]: they moved in systemd 230, and a
+# modern systemd silently ignores them under [Service] and falls back to its
+# default of 5 restarts per 10s - which would let a brief failure loop exhaust
+# the budget and leave the app down. 8 tries over 2 minutes rides out a slow
+# network at boot while still giving up on genuinely broken code.
+StartLimitBurst=8
+StartLimitIntervalSec=120
 
 [Service]
 Type=simple
@@ -179,9 +186,6 @@ Environment=PYTHONUNBUFFERED=1
 ExecStart=$INSTALL_DIR/.venv/bin/python -m app.main
 Restart=always
 RestartSec=3
-# Give up only after many rapid failures, so a bad update cannot flap forever.
-StartLimitBurst=8
-StartLimitIntervalSec=120
 
 # Modest hardening. ReadWritePaths is what the self-updater needs: it writes
 # into the checkout (git) and into data/ (database + backups).

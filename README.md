@@ -64,6 +64,12 @@ add your own. Every group gets a spend-by-category breakdown.
 **Guests.** Not everyone splitting a bill needs a login. Add a guest by name to
 include someone's partner or the friend who never signed up.
 
+**Share links — let people pick their own items.** Generate a link for a bill
+and send it round. Whoever opens it picks their name from the people on the
+bill — or adds their own if they are not listed — ticks what they had, and sees
+what they owe. No account, no sign-in. You watch the picks arrive live from the
+bill editor, then close the link once everyone has answered.
+
 **Settle up.** The app works out the *fewest* transfers that clear every debt
 ("Dana pays Jon $42.96") and lets you record payments as they happen. Export any
 group to CSV.
@@ -100,6 +106,55 @@ bills is rewritten onto a guest named "Their Name (removed)" in each group they
 took part in, so old totals and balances stay correct — those numbers are what
 people actually owe each other. There is a checkbox to discard the history
 instead if you really want to.
+
+## Share links in detail
+
+Open a saved bill and press **Create a share link**. You get a URL like
+`http://your-pi:9100/s/xeM_RSNhNUx1IuOY81M8SMYC5VlwR2yj` to paste into the group
+chat.
+
+What the person opening it gets, in three taps:
+
+1. **Which one are you?** — the people already on the bill, showing who has
+   picked already. Or "I'm not on the list", where they type their name and are
+   added as a guest.
+2. **What did you have?** — the receipt, one line per item. Tapping an item
+   claims it; an item claimed by several people is split between them and says
+   who it is shared with.
+3. **You owe $X** — their share of the items they picked plus their share of
+   tax, tip and fees, and what everyone else owes.
+
+Their choice of name is remembered in that browser, so coming back to the link
+does not ask again.
+
+Meanwhile the bill editor shows a live panel: who has picked, how many items
+each, how many times the link has been opened. Toggle **Let people add their own
+name** off to freeze the guest list, or **Close for changes** once everyone has
+answered — the link still shows the bill, it just stops accepting edits.
+**Replace** issues a new token and kills the old link; **Delete** removes it
+entirely. Picks already made survive both.
+
+The link is a bearer credential: anyone holding it can pick, and can pick *as*
+anyone on the bill. That is unavoidable for a link you paste into a chat, so the
+app is careful about the blast radius:
+
+- A link exposes exactly one bill — its items, amounts and the display names of
+  the people splitting it. No usernames, no emails, no other bills, no group
+  balances, no admin surface. There is a test asserting the payload contains
+  none of those.
+- Every write is scoped to one person and to items on that one bill, so two
+  people ticking at the same table cannot overwrite each other.
+- Taking over a name that has already picked needs a confirmation.
+- Tokens are 32 random URL-safe characters, and repeated bad guesses from one
+  address get rate-limited.
+
+**A note on editing a shared bill.** If you have the bill open in the editor
+while people are picking, saving would overwrite their choices. Every bill
+carries a revision counter, and a save that was based on an older revision is
+refused with an offer to reload — so their picks cannot be silently lost. This
+is why `bills.revision` exists rather than comparing timestamps: `updated_at`
+has one-second resolution, and a pick landing in the same second you loaded the
+page would have slipped straight through.
 
 ## Auto-update
 
@@ -151,9 +206,9 @@ app/
   ledger.py      DB <-> splitter glue; group balances and settle-up
   updater.py     GitHub check, apply, verify, roll back
   deps.py        auth dependencies (who is calling, are they allowed)
-  routers/       auth, admin, groups, bills, system
-static/          index.html, css/, js/ (ES modules, no build)
-tests/           splitter unit tests, API tests, live-server tests
+  routers/       auth, admin, groups, bills, share, system
+static/          index.html, share.html, css/, js/ (ES modules, no build)
+tests/           splitter, API, live-server, updater, share, migration tests
 install.sh       the one-script installer
 ```
 
@@ -171,6 +226,10 @@ install.sh       the one-script installer
   disagree with the result.
 - Sessions live in the database, so an admin suspending or deleting an account
   kills its live sessions immediately.
+- **Share-link writes are surgical**, not whole-bill replaces, precisely so
+  several people claiming at once do not clobber one another. The owner's editor
+  is the one place that replaces wholesale, and that is what the revision check
+  protects.
 
 ## Tests
 
@@ -179,6 +238,8 @@ python tests/test_splitter.py       # the split engine (unit, incl. a 400-bill f
 python tests/test_api.py            # the whole API against a temp database
 python tests/test_live_server.py    # a real uvicorn server, real HTTP, concurrency
 python tests/test_updater.py        # update, roll back, refuse-when-dirty
+python tests/test_share.py          # share links, claiming, the lost-update guard
+python tests/test_migrations.py     # upgrading an old database in place
 ```
 
 Or all at once with `python -m pytest tests -q` if you have pytest.
