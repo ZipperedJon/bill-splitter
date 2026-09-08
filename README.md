@@ -388,9 +388,28 @@ Admin → Settings so share links are built from your domain rather than whateve
 address you happen to be browsing from, and turn off "let people request an
 account" once everyone has one - otherwise strangers can queue up requests for
 you to decline. Sign-in attempts are rate limited per IP and username, and the
-app only believes `X-Forwarded-For` from `127.0.0.1` by default (a tunnel on the
-same box), so nothing that can reach the port directly can spoof an IP to get
-around that. Set `BILLSPLIT_TRUSTED_PROXIES` if your proxy runs on another host.
+app only believes `X-Forwarded-For` from `127.0.0.1` by default, so nothing that
+can reach the port directly can spoof an IP to get around that.
+
+**If `cloudflared` runs on a different machine** - which it does whenever the
+tunnel's origin URL is a LAN address like `http://192.168.10.198:9100` rather
+than `localhost` - that default is too narrow: every visitor then looks like
+they are coming from the tunnel host, so per-IP limits apply to all of them at
+once. Point it at the machine running `cloudflared`:
+
+```
+BILLSPLIT_TRUSTED_PROXIES=192.168.10.42
+```
+
+A subnet works too (`192.168.10.0/24`), at the cost of trusting anything on your
+LAN to state its own client IP. To find the address, look at whose requests are
+arriving:
+
+```bash
+sudo journalctl -u bill-splitter -n 200 | grep -oE '^INFO: +[0-9.]+' | sort -u
+```
+
+Restart after editing `.env` (`sudo systemctl restart bill-splitter`).
 
 **If you put Cloudflare Access in front, it will block your share links.** If the whole hostname sits
 behind an Access policy, anyone opening `/s/<token>` gets an Access login screen
