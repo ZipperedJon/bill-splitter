@@ -398,11 +398,18 @@ async function updatesTab(reload) {
     value: String(status.check_interval_minutes), style: { maxWidth: '120px' },
   });
 
+  // "up to date" is only honest once we have actually asked GitHub. Before that
+  // say so, rather than reassuring the admin about a check that never ran.
+  const statusBadge = !status.repo
+    ? h('span.badge.right', {}, 'not configured')
+    : status.update_available
+      ? h('span.badge.accent.right', {}, 'update available')
+      : status.last_check
+        ? h('span.badge.pos.right', {}, 'up to date')
+        : h('span.badge.warn.right', {}, 'not checked yet');
+
   const statusCard = h('div.card', {},
-    h('div.card-head', {}, h('h2', {}, 'This install'),
-      status.update_available
-        ? h('span.badge.accent.right', {}, 'update available')
-        : h('span.badge.pos.right', {}, 'up to date')),
+    h('div.card-head', {}, h('h2', {}, 'This install'), statusBadge),
     h('div.card-body.stack-sm', {},
       row('Version', `v${status.version}`),
       row('Commit', status.current_commit_short || '—', true),
