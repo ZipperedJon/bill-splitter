@@ -92,6 +92,24 @@ export function centsToInput(cents) {
   return (n / 100).toFixed(2);
 }
 
+/**
+ * What `count` portions of a line divided `portions` ways actually cost.
+ *
+ * Mirrors the server's largest-remainder split exactly: when the line does not
+ * divide evenly the first few portions carry the odd cent. Computing this as
+ * `round(line / portions) * count` instead drifts by a cent or two, and a money
+ * app that quotes two different figures for the same thing is not trusted for
+ * long - so both ends run the same arithmetic.
+ */
+export function portionsCost(lineCents, portions, count) {
+  const line = Math.round(Number(lineCents) || 0);
+  const n = Math.max(0, Math.min(portions, Math.round(Number(count) || 0)));
+  if (portions <= 1) return n > 0 ? line : 0;
+  const each = Math.floor(line / portions);
+  const dearer = line - each * portions;   // this many portions cost a cent more
+  return n * each + Math.min(n, dearer);
+}
+
 export function pctLabel(value) {
   const n = Number(value) || 0;
   return `${Number.isInteger(n) ? n : Number(n.toFixed(4))}%`;

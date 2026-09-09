@@ -100,10 +100,13 @@ rest of the table does not quietly pay for it. When it is aimed at one person a
 percentage means a percentage of their share, and their tax and tip drop with
 it. It is capped at their share, so nobody ends up owing less than nothing.
 
-**Divide a line into portions.** One line for three beers or eight slices of
-pizza: set how many portions it holds and each person takes however many they
-had. The split follows the portions taken, so two beers and one beer is a 2:1
-split of that line rather than a 50/50 one.
+**Divide a line into portions.** Press Divide, say how many — three beers, eight
+slices — and the app prices one portion, to the cent. The line then shows
+"3 portions · $6.00 each", and people take however many they had. Taking one of
+three beers costs one beer, not the round; portions nobody takes are shared out
+across everyone, and the line says so rather than leaving you to work it out.
+When the amount does not divide evenly the odd cent goes to one portion, the
+price is shown with a ≈, and the line still totals exactly.
 
 **Sub-items for modifications.** Hang extras off a line — add bacon, oat milk,
 no onions, extra cheese. A sub-item is never claimed on its own: its cost

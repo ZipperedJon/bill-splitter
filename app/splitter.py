@@ -77,8 +77,21 @@ def _amount_from(mode: str, percent: float, cents: int, base_cents: int) -> int:
     return 0
 
 
-def _trim(value: float) -> str:
-    return str(int(value)) if float(value) == int(value) else str(round(float(value), 2))
+def portion_price(amount_cents: int, portions: int) -> int:
+    """The headline price of one portion, to the nearest cent.
+
+    The real split (see compute_bill) hands out largest-remainder portions so
+    the line still totals exactly, which can leave some portions a cent apart.
+    This is the number to *show* people; `portions_divide_evenly` says whether
+    it is the whole truth.
+    """
+    if portions <= 1:
+        return int(amount_cents)
+    return round_half_up(Decimal(int(amount_cents)) / Decimal(int(portions)))
+
+
+def portions_divide_evenly(amount_cents: int, portions: int) -> bool:
+    return portions <= 1 or int(amount_cents) % int(portions) == 0
 
 
 def _effective_shares(
@@ -169,30 +182,72 @@ def compute_bill(
         unassigned_lines = 0
 
         for item in item_list:
+            amount = int(item.get("amount_cents", 0))
+            label = item.get("label") or "An item"
+            portions = max(1, int(item.get("portions") or 1))
             shares: dict[str, float] = {
                 str(k): float(v) for k, v in _effective_shares(item, by_id).items()
                 if str(k) in base and float(v or 0) > 0
             }
+
             if not shares:
                 # Nobody picked this line. Sub-items follow their parent, so only
                 # count the top-level lines or the message double-counts.
                 if item.get("parent_id") is None:
                     unassigned_lines += 1
-                shares = {p: 1.0 for p in parties}
-            else:
-                portions = max(1, int(item.get("portions") or 1))
-                claimed = sum(shares.values())
-                if portions > 1 and claimed > portions:
-                    label = item.get("label") or "An item"
-                    warnings.append(
-                        f"{label}: {_trim(claimed)} of {portions} portions claimed - "
-                        "more than exist, so it is being split in those proportions."
-                    )
+                for party, cents in zip(parties, allocate(amount, [1.0] * len(parties))):
+                    base[party] += cents
+                continue
 
             keys = [p for p in parties if p in shares]  # stable order
-            for party, cents in zip(keys, allocate(int(item.get("amount_cents", 0)),
-                                                   [shares[p] for p in keys])):
-                base[party] += cents
+
+            if portions <= 1:
+                # An ordinary line shared by whoever is on it.
+                for party, cents in zip(keys, allocate(amount, [shares[p] for p in keys])):
+                    base[party] += cents
+                continue
+
+            # A divided line has a *price per portion*, not a proportion of the
+            # line. Three beers at 18.00 means a beer costs 6.00, so taking one
+            # costs 6.00 - it does not mean the only person who spoke up buys
+            # the round. Portions are priced with the same largest-remainder
+            # split as everything else, so they still add back to the line total
+            # exactly even when it does not divide evenly.
+            taken = {p: int(round(shares[p])) for p in keys}
+            total_taken = sum(taken.values())
+
+            if total_taken > portions:
+                # More claimed than exist. Sharing them out in those proportions
+                # is the only reading that still adds up; say so rather than
+                # silently inventing portions.
+                warnings.append(
+                    f"{label}: {total_taken} of {portions} portions claimed - more than "
+                    "exist, so the line is being split in those proportions instead."
+                )
+                for party, cents in zip(keys, allocate(amount, [shares[p] for p in keys])):
+                    base[party] += cents
+                continue
+
+            prices = allocate(amount, [1] * portions)
+            cursor = 0
+            for party in keys:
+                count = taken[party]
+                if count <= 0:
+                    continue
+                base[party] += sum(prices[cursor:cursor + count])
+                cursor += count
+
+            unclaimed = prices[cursor:]
+            if unclaimed:
+                # Portions nobody put their hand up for are treated like an
+                # unclaimed line: shared by everyone, same rule as elsewhere.
+                left = sum(unclaimed)
+                for party, cents in zip(parties, allocate(left, [1.0] * len(parties))):
+                    base[party] += cents
+                warnings.append(
+                    f"{label}: {len(unclaimed)} of {portions} portions "
+                    f"({money(left)}) not taken by anyone - split evenly across everyone."
+                )
 
         if unassigned_lines:
             warnings.append(

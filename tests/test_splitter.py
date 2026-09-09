@@ -11,7 +11,10 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from app.splitter import allocate, compute_bill, money, parse_money, percent_of, settle  # noqa: E402
+from app.splitter import (  # noqa: E402
+    allocate, compute_bill, money, parse_money, percent_of, portion_price,
+    portions_divide_evenly, settle,
+)
 
 
 def P(*keys, weight=1):
@@ -393,17 +396,55 @@ def test_a_divided_item_splits_by_portions_taken():
     assert not r["warnings"]
 
 
-def test_a_partly_claimed_divided_item_charges_the_takers():
-    # One of three beers claimed. The line total is what was actually spent, so
-    # it lands on the person who claimed rather than evaporating.
+def test_a_portion_costs_a_portion_not_the_whole_line():
+    """Dividing sets a price per portion. Taking one of three beers at 18.00
+    costs 6.00 - speaking up first must not buy you the whole round. The
+    portions nobody claimed fall back to the usual unclaimed rule."""
     r = compute_bill(
         split_mode="itemized",
         participants=P("u:1", "u:2"),
-        items=[{"id": 1, "parent_id": None, "amount_cents": 1800, "portions": 3,
-                "shares": {"u:1": 1}}],
+        items=[{"id": 1, "parent_id": None, "label": "Beer", "amount_cents": 1800,
+                "portions": 3, "shares": {"u:1": 1}}],
     )
-    assert r["per_party"]["u:1"]["base_cents"] == 1800
-    assert r["per_party"]["u:2"]["base_cents"] == 0
+    # 6.00 for the beer they took, plus half of the 12.00 nobody claimed.
+    assert r["per_party"]["u:1"]["base_cents"] == 600 + 600
+    assert r["per_party"]["u:2"]["base_cents"] == 600
+    assert sum(v["owed_cents"] for v in r["per_party"].values()) == r["total_cents"]
+    assert any("2 of 3 portions" in w and "not taken" in w for w in r["warnings"])
+
+
+def test_portions_are_exact_to_the_cent_when_they_do_not_divide_evenly():
+    # 10.00 into 3 is 3.33 and a third. Someone has to carry the odd cent, and
+    # the line still has to come to exactly 10.00.
+    r = compute_bill(
+        split_mode="itemized",
+        participants=P("u:1", "u:2", "u:3"),
+        items=[{"id": 1, "parent_id": None, "amount_cents": 1000, "portions": 3,
+                "shares": {"u:1": 1, "u:2": 1, "u:3": 1}}],
+    )
+    shares = sorted(v["base_cents"] for v in r["per_party"].values())
+    assert shares == [333, 333, 334]
+    assert sum(shares) == 1000
+    assert not r["warnings"], "every portion was taken, so nothing to warn about"
+
+    assert portion_price(1000, 3) == 333        # the number to show people
+    assert portion_price(1800, 3) == 600
+    assert portions_divide_evenly(1800, 3) is True
+    assert portions_divide_evenly(1000, 3) is False
+
+
+def test_two_people_sharing_one_portion_of_a_divided_line():
+    """Eight slices, and two people had three each - the rest went spare."""
+    r = compute_bill(
+        split_mode="itemized",
+        participants=P("u:1", "u:2", "u:3"),
+        items=[{"id": 1, "parent_id": None, "label": "Pizza", "amount_cents": 2400,
+                "portions": 8, "shares": {"u:1": 3, "u:2": 3}}],
+    )
+    # 300 a slice: three slices each, and the two spare split three ways.
+    assert r["per_party"]["u:1"]["base_cents"] == 900 + 200
+    assert r["per_party"]["u:2"]["base_cents"] == 900 + 200
+    assert r["per_party"]["u:3"]["base_cents"] == 200
     assert sum(v["owed_cents"] for v in r["per_party"].values()) == r["total_cents"]
 
 

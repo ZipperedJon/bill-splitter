@@ -10,7 +10,7 @@
 // 401 must never bounce a guest to a sign-in screen.
 
 import {
-  $, add, clear, confirmDialog, h, initials, modal, money, mount,
+  $, add, clear, confirmDialog, h, initials, modal, money, mount, portionsCost,
   niceDate, toast,
 } from './util.js';
 
@@ -255,16 +255,31 @@ function renderPicker() {
   const drawTotal = () => {
     let raw = 0;
     let count = 0;
+    const headcount = Math.max(1, data.people.length);
+
     for (const item of data.items) {
       const mine = state.taken.get(item.id) || 0;
-      if (mine <= 0) continue;
-      count += 1;
-      // Everyone else's portions on this line, so the running figure reflects
-      // sharing rather than showing the whole line price.
       const others = Object.entries(item.claims || {})
         .filter(([party]) => party !== me.party)
-        .reduce((sum, [, units]) => sum + Number(units || 0), 0);
-      raw += (item.line_total_cents * mine) / (mine + others);
+        .reduce((sum, units) => sum + Number(units[1] || 0), 0);
+
+      if (item.portions > 1) {
+        // Priced per portion, matching the server's arithmetic exactly: what
+        // you took costs what it costs, and portions nobody took are shared by
+        // the whole table.
+        if (mine > 0) { raw += portionsCost(item.line_total_cents, item.portions, mine); count += 1; }
+        const spare = Math.max(0, item.portions - mine - others);
+        if (spare > 0) {
+          const claimedCost = portionsCost(item.line_total_cents, item.portions, mine + others);
+          raw += (item.line_total_cents - claimedCost) / headcount;
+        }
+        continue;
+      }
+
+      if (mine <= 0) continue;
+      count += 1;
+      // A shared whole line splits between everyone who ticked it.
+      raw += item.line_total_cents / (mine + others);
     }
     mount(totalBox,
       h('div.spread', {},
@@ -300,14 +315,29 @@ function renderPicker() {
         `↳ ${sub.label}`,
         sub.amount_cents ? ` ${money(sub.amount_cents, currency)}` : ''));
 
+      // A divided line is priced per portion, so that is the number to show -
+      // "$6.00 each" answers "what do I owe if I had one" immediately.
+      const perPortion = divided
+        ? Math.round(item.line_total_cents / item.portions)
+        : item.line_total_cents;
+      const evenly = divided && item.line_total_cents % item.portions === 0;
+      const takenByAll = Object.values(item.claims || {})
+        .reduce((sum, n) => sum + Number(n || 0), 0);
+      const spare = divided ? Math.max(0, item.portions - takenByAll) : 0;
+
       const detail = h('span.grow', {},
-        h('div.title', {}, item.label),
+        h('div.title', {}, item.label,
+          divided
+            ? h('span.faint.small', {},
+                ` · ${evenly ? '' : '≈'}${money(perPortion, currency)} each`)
+            : null),
         ...subLines,
         h('div.meta', {},
           divided
             ? (on
                 ? `you took ${mine} of ${item.portions}`
-                : `${item.portions} portions — tap + for yours`)
+                  + (spare ? ` · ${spare} still spare` : '')
+                : `${item.portions} portions${spare ? `, ${spare} spare` : ''} — tap + for yours`)
             : otherNames.length
               ? `shared with ${otherNames.join(', ')}`
               : on ? 'just you' : 'tap to add'),

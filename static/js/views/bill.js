@@ -5,8 +5,8 @@
 import { api } from '../api.js';
 import {
   $, add, canShareNatively, centsToInput, clear, confirmDialog, copyText, h, initials,
-  money, moneyAbs, debounce, mount, pctLabel, relTime, shareIcon, shareOrCopy,
-  toast, today,
+  modal, money, moneyAbs, debounce, mount, pctLabel, portionsCost, relTime,
+  shareIcon, shareOrCopy, toast, today,
 } from '../util.js';
 import { go, state } from '../app.js';
 import { currencySymbol, promptDialog } from './groups.js';
@@ -64,13 +64,16 @@ export async function renderBillEditor({ groupId, billId }) {
   // form. Rebuilding on keystroke would tear the focused input out from under
   // the person typing, so only structural changes - a mode switch, adding a
   // row, toggling who is on the bill - get to do that.
-  const bodyBox = h('div.stack');
+  const bodyBox = h('div.editor-body');
   const fx = {
     preview: () => runPreview(),
     rerender: (focusKey) => { redrawBody(focusKey); runPreview(); },
   };
 
-  const shareBox = h('div.stack');
+  // Lets the stylesheet give this page the full width of a desktop monitor.
+  view.classList.add('editor-view');
+
+  const shareBox = h('div.stack.span-all');
 
   // Rebuilding the form throws away the DOM, which drops the scroll position
   // and whatever had focus. Both are restored here so adding a row or flipping
@@ -346,7 +349,7 @@ function detailsCard(bill, categories, group, fx) {
 function peopleCard(bill, parties, fx) {
   const onBill = new Set(bill.participants.map((p) => p.party));
 
-  return h('div.card', {},
+  return h('div.card.span-all', {},
     h('div.card-head', {}, h('h3', {}, 'Who is on this bill'),
       h('span.small.faint.right', {}, `${bill.participants.length} of ${parties.length}`)),
     h('div.card-body', {},
@@ -480,6 +483,14 @@ function itemsCard(bill, parties, symbol, fx) {
     const claimed = Object.values(item.shares).reduce((sum, n) => sum + (Number(n) || 0), 0);
     const subTotal = item.sub_items.reduce((sum, s) => sum + (Number(s.amount) || 0), 0);
 
+    // What one portion costs. Showing this is the whole point of dividing: it
+    // turns "3 portions" into "$6.00 each", which is the number people can
+    // actually check against the receipt.
+    const lineCents = Math.round((Number(item.amount) || 0) * 100);
+    const perPortion = divided ? Math.round(lineCents / portions) : lineCents;
+    const evenly = divided && lineCents % portions === 0;
+    const leftOver = Math.max(0, portions - claimed);
+
     const subRows = item.sub_items.map((sub, subIndex) => h('div.sub-row', {},
       h('span.sub-tick', {}, '↳'),
       h('input', {
@@ -517,12 +528,48 @@ function itemsCard(bill, parties, symbol, fx) {
           onclick: () => { bill.items.splice(index, 1); fx.rerender(); },
         }, '×'),
 
+        divided
+          ? h('div.portion-banner', {},
+              h('span.strong', {},
+                `${portions} portions · ${evenly ? '' : '≈'}`,
+                h('span.money', {}, `${symbol}${(perPortion / 100).toFixed(2)}`),
+                ' each'),
+              h('span.grow'),
+              h('button.btn.btn-sm', {
+                type: 'button',
+                onclick: async () => {
+                  const next = await askPortions(portions, portions);
+                  if (!next) return;
+                  item.portions = next;
+                  for (const key of Object.keys(item.shares)) {
+                    item.shares[key] = Math.min(item.shares[key], next);
+                  }
+                  fx.rerender();
+                },
+              }, 'Change'),
+              h('button.btn.btn-sm.btn-ghost', {
+                type: 'button',
+                onclick: () => {
+                  item.portions = 1;
+                  for (const key of Object.keys(item.shares)) item.shares[key] = 1;
+                  fx.rerender();
+                },
+              }, 'Undo'))
+          : null,
+
         h('div.who', {},
           h('span.label-inline', {},
             divided
-              ? `Portions taken (${claimed} of ${portions}):`
+              ? `Who had one? (${claimed} of ${portions} taken)`
               : claimed ? 'Split between:' : 'Nobody picked — splits evenly:'),
           ...shareControls),
+
+        divided && leftOver > 0
+          ? h('div.tiny.faint', { style: { gridColumn: '1 / -1' } },
+              `${leftOver} portion${leftOver === 1 ? '' : 's'} `
+              + `(${symbol}${((lineCents - portionsCost(lineCents, portions, claimed)) / 100).toFixed(2)}) `
+              + 'nobody has taken — that part splits evenly across everyone.')
+          : null,
       ),
 
       subRows.length
@@ -543,40 +590,19 @@ function itemsCard(bill, parties, symbol, fx) {
           },
         }, '+ Extra / modification'),
 
-        divided
-          ? h('div.row-tight', {},
-              h('span.tiny.faint', {}, 'Divided into'),
-              h('input.portion-input', {
-                type: 'number', min: '1', max: '99', value: String(portions),
-                dataset: { focus: `item-portions-${index}` },
-                oninput: (event) => {
-                  const next = Math.max(1, Math.min(99, Number(event.target.value) || 1));
-                  item.portions = next;
-                  // Nobody can hold more portions than exist any more.
-                  for (const key of Object.keys(item.shares)) {
-                    item.shares[key] = Math.min(item.shares[key], next);
-                  }
-                  fx.preview();
-                },
-                onchange: () => fx.rerender(`item-portions-${index}`),
-              }),
-              h('span.tiny.faint', {}, 'portions'),
-              h('button.btn.btn-sm.btn-ghost', {
-                type: 'button',
-                onclick: () => {
-                  item.portions = 1;
-                  for (const key of Object.keys(item.shares)) item.shares[key] = 1;
-                  fx.rerender();
-                },
-              }, 'Undo divide'))
-          : h('button.btn.btn-sm.btn-ghost', {
-              type: 'button',
-              title: 'Split this one line into parts people can claim separately',
-              onclick: () => {
-                item.portions = Math.max(2, bill.participants.length || 2);
-                fx.rerender(`item-portions-${index}`);
-              },
-            }, '÷ Divide into portions'),
+        divided ? null : h('button.btn.btn-sm.btn-ghost', {
+          type: 'button',
+          title: 'Split this one line into equally priced parts people can take',
+          onclick: async () => {
+            // Ask rather than guess. Guessing the participant count was the
+            // confusing part: you press Divide expecting to say how many.
+            const next = await askPortions(1, Math.min(4, Math.max(2, bill.participants.length)));
+            if (!next) return;
+            item.portions = next;
+            for (const key of Object.keys(item.shares)) item.shares[key] = 1;
+            fx.rerender();
+          },
+        }, '÷ Divide'),
       ),
     );
   });
@@ -587,11 +613,11 @@ function itemsCard(bill, parties, symbol, fx) {
     0,
   );
 
-  return h('div.card', {},
+  return h('div.card.span-all', {},
     h('div.card-head', {}, h('h3', {}, 'Items'),
       h('span.small.faint.right.money', {}, `${symbol}${itemsTotal.toFixed(2)}`)),
     h('div.card-body', {},
-      rows.length ? h('div', {}, ...rows) : h('p.small.dim', {}, 'No items yet.'),
+      rows.length ? h('div.items-grid', {}, ...rows) : h('p.small.dim', {}, 'No items yet.'),
       h('div.row', { style: { marginTop: '12px' } },
         h('button.btn.btn-sm', {
           type: 'button',
@@ -791,6 +817,48 @@ function paidCard(bill, parties, symbol, currency, fx) {
 
 // --- share link --------------------------------------------------------------
 
+/** Ask how many ways to divide a line. Returns a number, or null if cancelled. */
+async function askPortions(currentValue, suggestion) {
+  const input = h('input', {
+    type: 'number', min: '2', max: '99', step: '1',
+    value: String(currentValue > 1 ? currentValue : suggestion),
+    style: { maxWidth: '110px', textAlign: 'center', fontSize: '1.1rem' },
+  });
+  const pick = (n) => { input.value = String(n); input.focus(); input.select(); };
+
+  const answer = await modal({
+    title: currentValue > 1 ? 'Change the number of portions' : 'Divide this item',
+    body: [
+      h('p.small.dim', { style: { margin: 0 } },
+        'How many equal portions does this line split into? Each portion gets '
+        + 'its own price, and people take however many they had.'),
+      h('div.field', {}, h('label', {}, 'Number of portions'),
+        h('div.row-tight', {}, input,
+          ...[2, 3, 4, 6, 8].map((n) => h('button.chip.btn-sm', {
+            type: 'button', onclick: () => pick(n),
+          }, String(n))))),
+      h('p.tiny.faint', { style: { margin: 0 } },
+        'Anything nobody takes is shared out across everyone on the bill.'),
+    ],
+    onMount: (panel, close) => {
+      input.focus();
+      input.select();
+      input.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter') { event.preventDefault(); close(Number(input.value) || 0); }
+      });
+    },
+    actions: (close) => [
+      h('button.btn', { type: 'button', onclick: () => close(null) }, 'Cancel'),
+      h('button.btn.btn-primary', {
+        type: 'button', onclick: () => close(Number(input.value) || 0),
+      }, currentValue > 1 ? 'Update' : 'Divide'),
+    ],
+  });
+
+  if (answer === null) return null;
+  return Math.max(2, Math.min(99, Math.round(answer) || 2));
+}
+
 /** Is this hostname only reachable from the local network? */
 function isPrivateHost(hostname) {
   const host = (hostname || '').toLowerCase();
@@ -803,7 +871,7 @@ function isPrivateHost(hostname) {
 }
 
 function newBillShareHint() {
-  return h('div.card', {},
+  return h('div.card.span-all', {},
     h('div.card-head', {}, h('h3', {}, 'Let people pick their own items')),
     h('div.card-body.small.dim', {},
       'Save the bill first, then you can generate a link to send round. '

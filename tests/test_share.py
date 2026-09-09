@@ -361,6 +361,27 @@ def test_a_guest_takes_some_portions_of_a_divided_line():
     assert lines["jon"]["base_cents"] == 600 + 700
 
 
+def test_a_portion_costs_a_portion_through_the_share_link():
+    """The behaviour that made dividing confusing: taking one of three beers
+    used to bill you for all three. It should cost one beer."""
+    client = fresh_client()
+    bill = mixed_bill(client)
+    token = make_link(client, bill["bill_id"])
+    beer = str(bill["ids"]["Beer"])          # 18.00 over 3 portions
+
+    r = guest().post(f"/api/share/{token}/claims",
+                     json={"party": bill["dana"], "portions": {beer: 1}})
+    assert r.status_code == 200, r.text
+
+    detail = client.get(f"/api/bills/{bill['bill_id']}").json()
+    lines = {b["name"]: b for b in detail["breakdown"]}
+    # 6.00 for her beer, plus her half of the two nobody took (12.00) and half
+    # of the unclaimed burger line (14.00).
+    assert lines["Dana"]["base_cents"] == 600 + 600 + 700
+    assert lines["jon"]["base_cents"] == 600 + 700
+    assert sum(b["owed_cents"] for b in detail["breakdown"]) == detail["totals"]["total_cents"]
+
+
 def test_a_guest_cannot_take_more_portions_than_the_line_has():
     client = fresh_client()
     bill = mixed_bill(client)
