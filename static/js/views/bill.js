@@ -5,7 +5,7 @@
 import { api } from '../api.js';
 import {
   $, add, canShareNatively, centsToInput, clear, confirmDialog, copyText, h, initials,
-  modal, money, moneyAbs, debounce, mount, pctLabel, portionsCost, relTime,
+  modal, money, moneyAbs, debounce, mount, pctLabel, relTime,
   shareIcon, shareOrCopy, toast, today,
 } from '../util.js';
 import { go, state } from '../app.js';
@@ -230,7 +230,7 @@ function fromApi(detail) {
       label: e.label, mode: e.mode, percent: e.percent,
       amount: e.cents ? centsToInput(e.cents) : '', split: e.split,
     })),
-    items: detail.items.map((i) => ({
+    items: expandStoredPortions(detail.items.map((i) => ({
       label: i.label,
       amount: i.amount_cents ? centsToInput(i.amount_cents) : '',
       portions: i.portions || 1,
@@ -239,7 +239,7 @@ function fromApi(detail) {
         label: s.label,
         amount: s.amount_cents ? centsToInput(s.amount_cents) : '',
       })),
-    })),
+    }))),
     participants: detail.participants.map((p) => ({ party: p.party, weight: p.weight })),
     payments: detail.payments.map((p) => ({ party: p.party, amount: centsToInput(p.amount_cents) })),
   };
@@ -440,56 +440,24 @@ function newItem() {
 
 function itemsCard(bill, parties, symbol, fx) {
   const rows = bill.items.map((item, index) => {
-    const portions = Math.max(1, Number(item.portions) || 1);
-    const divided = portions > 1;
-
-    // Whole line: a chip toggles you on or off. Divided line: a stepper, since
-    // "how many of the three beers" is the actual question.
+    // Every line works the same way now: tick whoever had it. Two names on one
+    // line means those two shared it, which is what a portion counter could
+    // never express.
     const shareControls = bill.participants.map((participant) => {
       const person = parties.find((p) => p.party === participant.party) || { name: '?' };
-      const taken = Number(item.shares[participant.party] || 0);
-
-      if (!divided) {
-        return h('button.chip.btn-sm', {
-          type: 'button', 'aria-pressed': taken > 0 ? 'true' : 'false',
-          onclick: () => {
-            if (taken > 0) delete item.shares[participant.party];
-            else item.shares[participant.party] = 1;
-            fx.rerender();
-          },
-        }, person.name);
-      }
-
-      const setTaken = (next) => {
-        const clamped = Math.max(0, Math.min(portions, next));
-        if (clamped === 0) delete item.shares[participant.party];
-        else item.shares[participant.party] = clamped;
-        fx.rerender();
-      };
-      return h('span.portion-pick', { class: taken > 0 ? 'on' : '' },
-        h('button.icon-btn.btn-sm', {
-          type: 'button', 'aria-label': `One fewer for ${person.name}`,
-          disabled: taken <= 0, onclick: () => setTaken(taken - 1),
-        }, '−'),
-        h('span.portion-name', {}, person.name),
-        h('span.portion-count', {}, String(taken)),
-        h('button.icon-btn.btn-sm', {
-          type: 'button', 'aria-label': `One more for ${person.name}`,
-          disabled: taken >= portions, onclick: () => setTaken(taken + 1),
-        }, '+'),
-      );
+      const on = Number(item.shares[participant.party] || 0) > 0;
+      return h('button.chip.btn-sm', {
+        type: 'button', 'aria-pressed': on ? 'true' : 'false',
+        onclick: () => {
+          if (on) delete item.shares[participant.party];
+          else item.shares[participant.party] = 1;
+          fx.rerender();
+        },
+      }, person.name);
     });
 
-    const claimed = Object.values(item.shares).reduce((sum, n) => sum + (Number(n) || 0), 0);
+    const sharers = Object.keys(item.shares).length;
     const subTotal = item.sub_items.reduce((sum, s) => sum + (Number(s.amount) || 0), 0);
-
-    // What one portion costs. Showing this is the whole point of dividing: it
-    // turns "3 portions" into "$6.00 each", which is the number people can
-    // actually check against the receipt.
-    const lineCents = Math.round((Number(item.amount) || 0) * 100);
-    const perPortion = divided ? Math.round(lineCents / portions) : lineCents;
-    const evenly = divided && lineCents % portions === 0;
-    const leftOver = Math.max(0, portions - claimed);
 
     const subRows = item.sub_items.map((sub, subIndex) => h('div.sub-row', {},
       h('span.sub-tick', {}, '↳'),
@@ -528,48 +496,12 @@ function itemsCard(bill, parties, symbol, fx) {
           onclick: () => { bill.items.splice(index, 1); fx.rerender(); },
         }, '×'),
 
-        divided
-          ? h('div.portion-banner', {},
-              h('span.strong', {},
-                `${portions} portions · ${evenly ? '' : '≈'}`,
-                h('span.money', {}, `${symbol}${(perPortion / 100).toFixed(2)}`),
-                ' each'),
-              h('span.grow'),
-              h('button.btn.btn-sm', {
-                type: 'button',
-                onclick: async () => {
-                  const next = await askPortions(portions, portions);
-                  if (!next) return;
-                  item.portions = next;
-                  for (const key of Object.keys(item.shares)) {
-                    item.shares[key] = Math.min(item.shares[key], next);
-                  }
-                  fx.rerender();
-                },
-              }, 'Change'),
-              h('button.btn.btn-sm.btn-ghost', {
-                type: 'button',
-                onclick: () => {
-                  item.portions = 1;
-                  for (const key of Object.keys(item.shares)) item.shares[key] = 1;
-                  fx.rerender();
-                },
-              }, 'Undo'))
-          : null,
-
         h('div.who', {},
           h('span.label-inline', {},
-            divided
-              ? `Who had one? (${claimed} of ${portions} taken)`
-              : claimed ? 'Split between:' : 'Nobody picked — splits evenly:'),
+            sharers > 1
+              ? `Shared by ${sharers}:`
+              : sharers ? 'Had by:' : 'Nobody picked — splits evenly:'),
           ...shareControls),
-
-        divided && leftOver > 0
-          ? h('div.tiny.faint', { style: { gridColumn: '1 / -1' } },
-              `${leftOver} portion${leftOver === 1 ? '' : 's'} `
-              + `(${symbol}${((lineCents - portionsCost(lineCents, portions, claimed)) / 100).toFixed(2)}) `
-              + 'nobody has taken — that part splits evenly across everyone.')
-          : null,
       ),
 
       subRows.length
@@ -590,17 +522,16 @@ function itemsCard(bill, parties, symbol, fx) {
           },
         }, '+ Extra / modification'),
 
-        divided ? null : h('button.btn.btn-sm.btn-ghost', {
+        h('button.btn.btn-sm.btn-ghost', {
           type: 'button',
-          title: 'Split this one line into equally priced parts people can take',
+          title: 'Split this into that many separate lines of equal price',
           onclick: async () => {
-            // Ask rather than guess. Guessing the participant count was the
-            // confusing part: you press Divide expecting to say how many.
-            const next = await askPortions(1, Math.min(4, Math.max(2, bill.participants.length)));
-            if (!next) return;
-            item.portions = next;
-            for (const key of Object.keys(item.shares)) item.shares[key] = 1;
-            fx.rerender();
+            // Ask rather than guess. Guessing the head count was half the
+            // confusion: you press Divide expecting to say how many.
+            const ways = await askHowManyWays(item, Math.min(4, Math.max(2, bill.participants.length)));
+            if (!ways) return;
+            bill.items.splice(index, 1, ...splitIntoLines(item, ways));
+            fx.rerender(`item-label-${index}`);
           },
         }, '÷ Divide'),
       ),
@@ -818,29 +749,42 @@ function paidCard(bill, parties, symbol, currency, fx) {
 // --- share link --------------------------------------------------------------
 
 /** Ask how many ways to divide a line. Returns a number, or null if cancelled. */
-async function askPortions(currentValue, suggestion) {
+async function askHowManyWays(item, suggestion) {
+  const lineCents = Math.round((Number(item.amount) || 0) * 100);
   const input = h('input', {
-    type: 'number', min: '2', max: '99', step: '1',
-    value: String(currentValue > 1 ? currentValue : suggestion),
+    type: 'number', min: '2', max: '99', step: '1', value: String(suggestion),
     style: { maxWidth: '110px', textAlign: 'center', fontSize: '1.1rem' },
   });
-  const pick = (n) => { input.value = String(n); input.focus(); input.select(); };
+  const preview = h('p.small.dim', { style: { margin: 0 } });
+  const draw = () => {
+    const n = Math.max(2, Math.min(99, Math.round(Number(input.value) || 0)));
+    mount(preview, lineCents
+      ? `Makes ${n} separate lines of about ${(Math.round(lineCents / n) / 100).toFixed(2)} each.`
+      : `Makes ${n} separate lines.`);
+  };
+  const pick = (n) => { input.value = String(n); draw(); input.focus(); input.select(); };
 
   const answer = await modal({
-    title: currentValue > 1 ? 'Change the number of portions' : 'Divide this item',
+    title: 'Divide this item',
     body: [
       h('p.small.dim', { style: { margin: 0 } },
-        'How many equal portions does this line split into? Each portion gets '
-        + 'its own price, and people take however many they had.'),
-      h('div.field', {}, h('label', {}, 'Number of portions'),
+        'Splits this into that many separate lines of equal price. Each one '
+        + 'then goes to whoever had it — and one that two people shared can '
+        + 'simply have both their names ticked on it.'),
+      h('div.field', {}, h('label', {}, 'How many?'),
         h('div.row-tight', {}, input,
           ...[2, 3, 4, 6, 8].map((n) => h('button.chip.btn-sm', {
             type: 'button', onclick: () => pick(n),
           }, String(n))))),
-      h('p.tiny.faint', { style: { margin: 0 } },
-        'Anything nobody takes is shared out across everyone on the bill.'),
+      preview,
+      item.sub_items && item.sub_items.length
+        ? h('p.tiny.faint', { style: { margin: 0 } },
+            `The extras on this line stay with the first of them.`)
+        : null,
     ],
     onMount: (panel, close) => {
+      draw();
+      input.addEventListener('input', draw);
       input.focus();
       input.select();
       input.addEventListener('keydown', (event) => {
@@ -851,12 +795,71 @@ async function askPortions(currentValue, suggestion) {
       h('button.btn', { type: 'button', onclick: () => close(null) }, 'Cancel'),
       h('button.btn.btn-primary', {
         type: 'button', onclick: () => close(Number(input.value) || 0),
-      }, currentValue > 1 ? 'Update' : 'Divide'),
+      }, 'Divide'),
     ],
   });
 
   if (answer === null) return null;
   return Math.max(2, Math.min(99, Math.round(answer) || 2));
+}
+
+/**
+ * Split one line into `count` equally priced lines.
+ *
+ * Real separate lines rather than a portion counter, because a counter can only
+ * say "Jon had two of these". It has no way to express one bread bowl shared by
+ * two people. As ordinary lines that is just two names ticked on one of them,
+ * reusing the sharing that already works everywhere else.
+ *
+ * Amounts come off the same largest-remainder split the engine uses, so they
+ * still add back to the original line exactly.
+ */
+function splitIntoLines(item, count) {
+  const lineCents = Math.round((Number(item.amount) || 0) * 100);
+  const each = Math.floor(lineCents / count);
+  const dearer = lineCents - each * count;   // this many lines cost a cent more
+
+  return Array.from({ length: count }, (_, index) => ({
+    label: item.label,
+    amount: ((each + (index < dearer ? 1 : 0)) / 100).toFixed(2),
+    portions: 1,
+    shares: {},
+    // A modification belongs to one plate, so it stays with the first line
+    // rather than being duplicated onto every one of them.
+    sub_items: index === 0 ? (item.sub_items || []) : [],
+  }));
+}
+
+/**
+ * Turn any line still stored with a portion count into that many lines.
+ *
+ * Bills saved before portions became separate lines still have them. Expanding
+ * on load means the editor only ever deals with one idea, and saving quietly
+ * normalises the bill. The arithmetic is identical either way - the same
+ * largest-remainder amounts, the same people on the same portions - so nothing
+ * moves when a bill is converted.
+ */
+function expandStoredPortions(items) {
+  const out = [];
+  for (const item of items) {
+    const count = Math.max(1, Number(item.portions) || 1);
+    if (count <= 1) {
+      out.push(item);
+      continue;
+    }
+    const lines = splitIntoLines(item, count);
+    // Whoever held k portions gets k of the new lines, in order - which is
+    // exactly which portions the engine had already charged them for.
+    let cursor = 0;
+    for (const [party, held] of Object.entries(item.shares || {})) {
+      for (let n = 0; n < Math.round(Number(held) || 0) && cursor < lines.length; n += 1) {
+        lines[cursor].shares = { [party]: 1 };
+        cursor += 1;
+      }
+    }
+    out.push(...lines);
+  }
+  return out;
 }
 
 /** Is this hostname only reachable from the local network? */

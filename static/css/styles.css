@@ -398,37 +398,9 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; white-sp
   .editor .side .card-body { overflow-y: auto; }
 }
 
-/* On a wide monitor a single 900px column wastes most of the screen and turns
-   a long bill into a lot of scrolling. Widen the page and lay the form out in
-   two columns; the item list keeps the full width because its rows need it. */
-@media (min-width: 1400px) {
-  .view.editor-view { max-width: 1640px; }
-  .editor { grid-template-columns: minmax(0, 1fr) 380px; }
-  .editor-body {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    /* Dense packing backfills the hole a full-width card would otherwise leave
-       beside a half-width one. Reading order stays the DOM order, which is the
-       order that makes sense on a phone. */
-    grid-auto-flow: dense;
-  }
-  .editor-body > .span-all { grid-column: 1 / -1; }
-
-  /* The item list is what actually makes a long bill long - one block per line,
-     each with a row of participant chips. Two columns halves that. */
-  .items-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 22px; }
-}
-@media (min-width: 2000px) {
-  .view.editor-view { max-width: 1900px; }
-  .editor { grid-template-columns: minmax(0, 1fr) 440px; }
-}
-
 .charge-row { display: grid; gap: 8px; grid-template-columns: 1fr auto; align-items: end; }
 .charge-row .seg { align-self: end; }
 
-/* No grid-template-columns here on purpose: a grid is one column by default,
-   and declaring it would override the two-column rule in the wide-screen media
-   query above, which has the same specificity but comes earlier in the file. */
-.items-grid { display: grid; align-items: start; }
 .item-block { padding: 12px 0; border-bottom: 1px solid var(--border); }
 .item-block:last-child { border-bottom: 0; }
 
@@ -474,17 +446,8 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; white-sp
 .portion-pick.on .portion-count { color: var(--accent); }
 /* Native number spinners eat most of a narrow field and push the value out of
    sight, so they are removed and the stepper buttons do that job instead. */
-/* States the price of one portion, which is the number people check against
-   the receipt - "3 portions" on its own tells them nothing useful. */
-.portion-banner {
-  grid-column: 1 / -1;
-  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
-  margin: 8px 0 2px; padding: 7px 10px;
-  border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
-  border-radius: var(--radius-sm); background: var(--accent-soft);
-  font-size: .86rem;
-}
-.portion-banner .strong { color: var(--accent); }
+/* Still used by the guest share page for any bill saved before dividing
+   produced separate lines; the editor converts those on load. */
 
 .person-row {
   display: grid; gap: 8px; padding: 9px 0; align-items: center;
@@ -541,6 +504,39 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; white-sp
 .sr-only {
   position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
   overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+}
+
+/* --- wide screens ---------------------------------------------------------
+   Kept last on purpose. These share specificity with the base rules above, so
+   anything declared later would silently win - which it did, twice, while
+   this section lived further up the file. */
+
+/* On a wide monitor a single 900px column wastes most of the screen and turns
+   a long bill into a lot of scrolling. Widen the page and lay the form out in
+   two columns; the item list keeps the full width because its rows need it. */
+@media (min-width: 1400px) {
+  .view.editor-view { max-width: 1640px; }
+  .editor { grid-template-columns: minmax(0, 1fr) 380px; }
+  .editor-body {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    /* Dense packing backfills the hole a full-width card would otherwise leave
+       beside a half-width one. Reading order stays the DOM order, which is the
+       order that makes sense on a phone. */
+    grid-auto-flow: dense;
+  }
+  .editor-body > .span-all { grid-column: 1 / -1; }
+
+  /* The item list is what actually makes a long bill long - one block per line,
+     each with a row of participant chips. Two columns halves that.
+     Multi-column rather than a two-column grid: grid rows are as tall as their
+     tallest cell, so a short line beside a tall one leaves a hole the height of
+     the difference. Columns just flow, and break-inside keeps a line whole. */
+  .items-grid { column-count: 2; column-gap: 26px; }
+  .items-grid > .item-block { break-inside: avoid; }
+}
+@media (min-width: 2000px) {
+  .view.editor-view { max-width: 1900px; }
+  .editor { grid-template-columns: minmax(0, 1fr) 440px; }
 }
 
 @media print {
