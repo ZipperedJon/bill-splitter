@@ -71,9 +71,14 @@ def load_bill(conn: sqlite3.Connection, bill_id: int) -> dict[str, Any] | None:
         return None
 
     participants = [
-        {"id": r["id"], "party": r["party"], "weight": r["weight"]}
+        {
+            "id": r["id"],
+            "party": r["party"],
+            "weight": r["weight"],
+            "exempt": bool(r["exempt"]),
+        }
         for r in conn.execute(
-            "SELECT id, party, weight FROM bill_participants WHERE bill_id=? ORDER BY id",
+            "SELECT id, party, weight, exempt FROM bill_participants WHERE bill_id=? ORDER BY id",
             (bill_id,),
         )
     ]
@@ -177,6 +182,7 @@ def compute(raw: dict[str, Any]) -> dict[str, Any]:
         },
         extras=raw["extras"],
         payments=raw["payments"],
+        unclaimed_mode=b["unclaimed_mode"],
     )
 
 
@@ -196,6 +202,7 @@ def bill_detail(conn: sqlite3.Connection, bill_id: int) -> dict[str, Any] | None
                 "party": key,
                 "name": party_label(parties, key),
                 "weight": participant["weight"],
+                "exempt": bool(participant.get("exempt")),
             }
         )
         breakdown.append(line)
@@ -261,6 +268,9 @@ def group_ledger(conn: sqlite3.Connection, group_id: int) -> dict[str, Any]:
                 "total_cents": result["total_cents"],
                 "paid_total_cents": result["paid_total_cents"],
                 "unpaid_cents": result["unpaid_cents"],
+                # Money on this bill that is on nobody's total, so the group
+                # list can flag a bill that is not finished being claimed.
+                "unassigned_cents": result["unassigned_cents"],
                 "participant_count": len(raw["participants"]),
                 "created_by_name": bill["created_by_name"],
                 "warnings": result["warnings"],

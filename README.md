@@ -104,9 +104,26 @@ it. It is capped at their share, so nobody ends up owing less than nothing.
 the line becomes that many separate lines of equal price, to the cent. Each one
 then goes to whoever had it, using the same name chips as every other line. So
 one bread bowl shared by two people is just both their names ticked on it, and
-taking one of three beers costs one beer rather than the round. Lines nobody
-claims are shared across everyone, as usual. When the amount does not divide
-evenly the odd cent lands on one line, and they still total exactly.
+taking one of three beers costs one beer rather than the round. When the amount
+does not divide evenly the odd cent lands on one line, and they still total
+exactly.
+
+**Nothing is charged to people who did not pick it.** A line nobody has ticked
+is left *unassigned*: it counts toward the bill total, carries its own share of
+tax and tip, and is shown on its own — in the breakdown, on the group's bill
+list, and on the share page — rather than being quietly shared out. Guessing
+that everybody split the thing moves everyone's total with nothing on screen
+saying why, and it is usually the wrong guess. There is an **Everyone** button
+on each line for the plate the whole table really did share, and a per-bill
+switch back to **Split evenly** for anyone who prefers the old rule.
+
+**Somebody not paying.** Tap a name under *Not paying* — a birthday, or someone
+being treated — and they owe exactly nothing: their items, and their share of
+tax, tip and fees, are covered by everybody else. They can still be the one who
+put their card down, in which case they are simply owed all of it back.
+
+**Live search.** Long bills get a search box over the item list and over *Who
+paid*, filtering as you type without disturbing anything you are editing.
 
 **Sub-items for modifications.** Hang extras off a line — add bacon, oat milk,
 no onions, extra cheese. A sub-item is never claimed on its own: its cost
@@ -314,6 +331,18 @@ install.sh       the one-script installer
   Adding an item puts the cursor in its name field; flipping tax to a percentage
   puts it in the percentage box. A naive re-render throws you back to the top of
   the page, which is miserable on a phone at a restaurant table.
+- **Unassigned money is a participant the engine can allocate to**, keyed `"?"`
+  — a bucket that takes its share of tax and tip like anybody else, then gets
+  pulled out and reported on its own. That is why the invariant still holds:
+  what the people owe plus what is unassigned is exactly the total. Leaving it
+  out of the allocation would have meant a second money path.
+- **Not paying is applied to the base, once.** Their share moves to the payers
+  before tax, so everything downstream — tax, tip, proportional fees — follows
+  from their share being zero rather than from five separate exemptions that
+  could each be got wrong.
+- **The search boxes hide rows in place; they do not rebuild the list.** Same
+  reason the form only rebuilds on structural changes: rebuilding on keystroke
+  tears the input out from under whoever is typing.
 
 ## Tests
 

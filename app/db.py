@@ -24,7 +24,7 @@ from typing import Any, Iterator
 
 from . import config
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 DEFAULT_CATEGORIES = [
     ("Food & Restaurant", "restaurant", 10),
@@ -167,6 +167,13 @@ CREATE TABLE IF NOT EXISTS bills (
     tip_cents       INTEGER NOT NULL DEFAULT 0,
     tip_base        TEXT NOT NULL DEFAULT 'pre_tax' CHECK (tip_base IN ('pre_tax','post_tax')),
 
+    -- What to do with an item nobody has ticked. 'unassigned' leaves it off
+    -- everybody's total and reports it on its own; 'even' is the older
+    -- behaviour of quietly sharing it out, which is right for a plate the whole
+    -- table picked at and wrong for the salad somebody forgot to claim.
+    unclaimed_mode  TEXT NOT NULL DEFAULT 'unassigned'
+                    CHECK (unclaimed_mode IN ('unassigned','even')),
+
     created_by      INTEGER REFERENCES users(id) ON DELETE SET NULL,
     created_at      INTEGER NOT NULL,
     updated_at      INTEGER NOT NULL,
@@ -182,7 +189,10 @@ CREATE TABLE IF NOT EXISTS bill_participants (
     id      INTEGER PRIMARY KEY AUTOINCREMENT,
     bill_id INTEGER NOT NULL REFERENCES bills(id) ON DELETE CASCADE,
     party   TEXT NOT NULL,                        -- 'u:<id>' or 'g:<id>'
-    weight  REAL NOT NULL DEFAULT 1
+    weight  REAL NOT NULL DEFAULT 1,
+    -- The birthday rule: this person pays nothing and their share is covered
+    -- by everybody else on the bill.
+    exempt  INTEGER NOT NULL DEFAULT 0
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_bp_bill_party ON bill_participants(bill_id, party);
 
@@ -417,6 +427,20 @@ def _migrate(conn: sqlite3.Connection, from_version: int) -> None:
                 "ALTER TABLE bill_items ADD COLUMN portions INTEGER NOT NULL DEFAULT 1"
             )
         version = 4
+
+    if version < 5:
+        # v5: unclaimed items are left unassigned rather than shared out, and
+        # somebody can be marked as not paying.
+        if not _has_column(conn, "bills", "unclaimed_mode"):
+            conn.execute(
+                "ALTER TABLE bills ADD COLUMN unclaimed_mode TEXT NOT NULL "
+                "DEFAULT 'unassigned' CHECK (unclaimed_mode IN ('unassigned','even'))"
+            )
+        if not _has_column(conn, "bill_participants", "exempt"):
+            conn.execute(
+                "ALTER TABLE bill_participants ADD COLUMN exempt INTEGER NOT NULL DEFAULT 0"
+            )
+        version = 5
 
     if version != from_version:
         conn.execute("UPDATE meta SET value=? WHERE key='schema_version'", (str(version),))

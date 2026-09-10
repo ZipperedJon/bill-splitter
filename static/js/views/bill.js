@@ -45,6 +45,10 @@ export async function renderBillEditor({ groupId, billId }) {
   const currency = bill.currency || group.currency || 'USD';
   const symbol = currencySymbol(currency);
 
+  // Screen state, deliberately not part of the bill: what the two search boxes
+  // are narrowed to. Kept out here so rebuilding the form does not clear them.
+  const ui = { itemFilter: '', paidFilter: '' };
+
   // --- live preview ---------------------------------------------------------
   const previewBox = h('div.stack-sm');
   let lastGood = null;
@@ -87,11 +91,11 @@ export async function renderBillEditor({ groupId, billId }) {
       detailsCard(bill, categories, group, fx),
       peopleCard(bill, parties, fx),
       bill.split_mode === 'itemized'
-        ? itemsCard(bill, parties, symbol, fx)
+        ? itemsCard(bill, parties, symbol, fx, ui)
         : subtotalCard(bill, symbol, fx),
       chargesCard(bill, parties, symbol, fx),
       extrasCard(bill, symbol, fx),
-      paidCard(bill, parties, symbol, currency, fx),
+      paidCard(bill, parties, symbol, currency, fx, ui),
       billId ? shareBox : newBillShareHint(),
     );
     window.scrollTo({ top: scrollY, behavior: 'instant' });
@@ -184,7 +188,7 @@ export async function renderBillEditor({ groupId, billId }) {
 
 function blankBill(group, parties) {
   const me = `u:${state.user.id}`;
-  const everyone = parties.map((p) => ({ party: p.party, weight: 1 }));
+  const everyone = parties.map((p) => ({ party: p.party, weight: 1, exempt: false }));
   return {
     title: '',
     category_id: null,
@@ -192,6 +196,7 @@ function blankBill(group, parties) {
     bill_date: today(),
     currency: group.currency || state.defaults.currency || 'USD',
     split_mode: 'even',
+    unclaimed_mode: 'unassigned',
     subtotal: '',
     discount: { mode: 'none', percent: 0, amount: '', target: 'all' },
     tax: { mode: 'none', percent: Number(state.defaults.tax_percent) || 0, amount: '' },
@@ -217,6 +222,7 @@ function fromApi(detail) {
     bill_date: b.bill_date,
     currency: b.currency,
     split_mode: b.split_mode,
+    unclaimed_mode: b.unclaimed_mode || 'unassigned',
     subtotal: b.subtotal_cents ? centsToInput(b.subtotal_cents) : '',
     discount: {
       mode: b.discount_mode,
@@ -240,7 +246,9 @@ function fromApi(detail) {
         amount: s.amount_cents ? centsToInput(s.amount_cents) : '',
       })),
     }))),
-    participants: detail.participants.map((p) => ({ party: p.party, weight: p.weight })),
+    participants: detail.participants.map((p) => ({
+      party: p.party, weight: p.weight, exempt: !!p.exempt,
+    })),
     payments: detail.payments.map((p) => ({ party: p.party, amount: centsToInput(p.amount_cents) })),
   };
 }
@@ -253,6 +261,7 @@ function toApi(bill) {
     bill_date: bill.bill_date,
     currency: bill.currency,
     split_mode: bill.split_mode,
+    unclaimed_mode: bill.unclaimed_mode || 'unassigned',
     subtotal: bill.subtotal || 0,
     discount: charge(bill.discount),
     tax: charge(bill.tax),
@@ -270,7 +279,9 @@ function toApi(bill) {
         .filter((s) => (s.label || '').trim() || Number(s.amount))
         .map((s) => ({ label: s.label, amount: s.amount || 0 })),
     })),
-    participants: bill.participants.map((p) => ({ party: p.party, weight: Number(p.weight) || 0 })),
+    participants: bill.participants.map((p) => ({
+      party: p.party, weight: Number(p.weight) || 0, exempt: !!p.exempt,
+    })),
     payments: bill.payments.filter((p) => p.amount !== '' && Number(p.amount) !== 0)
       .map((p) => ({ party: p.party, amount: p.amount })),
   };
@@ -348,12 +359,13 @@ function detailsCard(bill, categories, group, fx) {
 
 function peopleCard(bill, parties, fx) {
   const onBill = new Set(bill.participants.map((p) => p.party));
+  const notPaying = bill.participants.filter((p) => p.exempt).length;
 
   return h('div.card.span-all', {},
     h('div.card-head', {}, h('h3', {}, 'Who is on this bill'),
       h('span.small.faint.right', {}, `${bill.participants.length} of ${parties.length}`)),
     h('div.card-body', {},
-      h('div.row', { style: { marginBottom: bill.split_mode === 'shares' ? '12px' : '0' } },
+      h('div.row', {},
         ...parties.map((person) => h('button.chip', {
           type: 'button', 'aria-pressed': onBill.has(person.party) ? 'true' : 'false',
           onclick: () => {
@@ -373,15 +385,40 @@ function peopleCard(bill, parties, fx) {
         h('button.chip', {
           type: 'button',
           onclick: () => {
-            bill.participants = parties.map((p) => ({
-              party: p.party,
-              weight: (bill.participants.find((x) => x.party === p.party) || {}).weight || 1,
-            }));
+            bill.participants = parties.map((p) => {
+              const was = bill.participants.find((x) => x.party === p.party) || {};
+              return { party: p.party, weight: was.weight || 1, exempt: !!was.exempt };
+            });
             fx.rerender();
           },
         }, 'Everyone'),
       ),
-      bill.split_mode === 'shares' ? h('div', {},
+
+      // The birthday rule. A second row rather than a second state on the
+      // chips above: "on the bill" and "not paying for it" are different
+      // questions, and one chip cannot ask both.
+      bill.participants.length > 1 ? h('div', { style: { marginTop: '14px' } },
+        h('div.section-title', {}, notPaying ? `Not paying · ${notPaying}` : 'Somebody not paying?'),
+        h('div.row', {}, ...bill.participants.map((participant) => {
+          const person = parties.find((p) => p.party === participant.party) || { name: '?' };
+          return h('button.chip.btn-sm', {
+            type: 'button', 'aria-pressed': participant.exempt ? 'true' : 'false',
+            onclick: () => {
+              if (!participant.exempt
+                && bill.participants.every((p) => p.exempt || p === participant)) {
+                return toast('Somebody has to cover the bill.', 'err');
+              }
+              participant.exempt = !participant.exempt;
+              fx.rerender();
+            },
+          }, participant.exempt ? `🎂 ${person.name}` : person.name);
+        })),
+        h('span.hint', { style: { display: 'block', marginTop: '6px' } },
+          'Tap whoever is not paying — a birthday, or someone being treated. '
+          + 'Their items, tax and tip get covered by everybody else.'),
+      ) : null,
+
+      bill.split_mode === 'shares' ? h('div', { style: { marginTop: '14px' } },
         h('div.section-title', {}, 'Shares'),
         ...bill.participants.map((participant) => {
           const person = parties.find((p) => p.party === participant.party) || { name: '?' };
@@ -438,7 +475,58 @@ function newItem() {
   return { label: '', amount: '', portions: 1, shares: {}, sub_items: [] };
 }
 
-function itemsCard(bill, parties, symbol, fx) {
+/** What a live search matches an item against: its name and its extras. */
+function itemHaystack(item) {
+  return [item.label, ...(item.sub_items || []).map((s) => s.label)]
+    .join(' ').toLowerCase();
+}
+
+/**
+ * A search box that hides rows in place rather than rebuilding the list.
+ *
+ * Rebuilding on every keystroke would tear the input out from under whoever is
+ * typing in it - the same reason the form only rebuilds on structural changes.
+ * `read` pulls the text to match against straight out of the model, so a row
+ * stays findable by a name that is still being typed into it.
+ */
+function searchBox({ placeholder, state, key, container, rowSelector, read, noun }) {
+  const count = h('span.small.faint');
+
+  const apply = () => {
+    const needle = (state[key] || '').trim().toLowerCase();
+    const rows = container.querySelectorAll(rowSelector);
+    let shown = 0;
+    rows.forEach((row, index) => {
+      const hit = !needle || read(index).includes(needle);
+      row.hidden = !hit;
+      if (hit) shown += 1;
+    });
+    mount(count, !needle ? ''
+      : shown ? `${shown} of ${rows.length}`
+        : `no ${noun}`);
+  };
+
+  const input = h('input', {
+    type: 'search', placeholder, value: state[key], 'aria-label': placeholder,
+    dataset: { focus: `search-${key}` },
+    oninput: (event) => { state[key] = event.target.value; apply(); },
+  });
+
+  const box = h('div.list-search', {}, input, count,
+    h('button.btn.btn-sm.btn-ghost', {
+      type: 'button', title: 'Clear the search',
+      onclick: () => { state[key] = ''; input.value = ''; apply(); input.focus(); },
+    }, 'Clear'));
+
+  // Re-apply straight away: a rebuild has just thrown away the hidden flags,
+  // but the search text survived in `state`.
+  queueMicrotask(apply);
+  return box;
+}
+
+function itemsCard(bill, parties, symbol, fx, ui) {
+  const grid = h('div.items-grid');
+
   const rows = bill.items.map((item, index) => {
     // Every line works the same way now: tick whoever had it. Two names on one
     // line means those two shared it, which is what a portion counter could
@@ -455,6 +543,22 @@ function itemsCard(bill, parties, symbol, fx) {
         },
       }, person.name);
     });
+
+    // One tap for a plate the whole table shared, which is the case that would
+    // otherwise mean ticking a dozen names.
+    const everyoneOn = bill.participants.length
+      && bill.participants.every((p) => Number(item.shares[p.party] || 0) > 0);
+    if (bill.participants.length > 2) {
+      shareControls.push(h('button.chip.btn-sm', {
+        type: 'button', 'aria-pressed': everyoneOn ? 'true' : 'false',
+        title: everyoneOn ? 'Nobody had this' : 'Everybody shared this',
+        onclick: () => {
+          if (everyoneOn) item.shares = {};
+          else item.shares = Object.fromEntries(bill.participants.map((p) => [p.party, 1]));
+          fx.rerender();
+        },
+      }, 'Everyone'));
+    }
 
     const sharers = Object.keys(item.shares).length;
     const subTotal = item.sub_items.reduce((sum, s) => sum + (Number(s.amount) || 0), 0);
@@ -497,10 +601,12 @@ function itemsCard(bill, parties, symbol, fx) {
         }, '×'),
 
         h('div.who', {},
-          h('span.label-inline', {},
+          h('span.label-inline', { class: sharers ? null : 'unclaimed' },
             sharers > 1
               ? `Shared by ${sharers}:`
-              : sharers ? 'Had by:' : 'Nobody picked — splits evenly:'),
+              : sharers ? 'Had by:'
+                : bill.unclaimed_mode === 'even' ? 'Nobody picked — splits evenly:'
+                  : 'Nobody picked yet:'),
           ...shareControls),
       ),
 
@@ -531,6 +637,7 @@ function itemsCard(bill, parties, symbol, fx) {
             const ways = await askHowManyWays(item, Math.min(4, Math.max(2, bill.participants.length)));
             if (!ways) return;
             bill.items.splice(index, 1, ...splitIntoLines(item, ways));
+            ui.itemFilter = '';   // the new lines must not land behind a filter
             fx.rerender(`item-label-${index}`);
           },
         }, '÷ Divide'),
@@ -544,22 +651,55 @@ function itemsCard(bill, parties, symbol, fx) {
     0,
   );
 
+  mount(grid, ...rows);
+
+  const unpicked = bill.items.filter((item) => !Object.keys(item.shares).length).length;
+
   return h('div.card.span-all', {},
     h('div.card-head', {}, h('h3', {}, 'Items'),
       h('span.small.faint.right.money', {}, `${symbol}${itemsTotal.toFixed(2)}`)),
     h('div.card-body', {},
-      rows.length ? h('div.items-grid', {}, ...rows) : h('p.small.dim', {}, 'No items yet.'),
+      // Only worth the space once the list is long enough to hunt through.
+      rows.length >= 5 ? searchBox({
+        placeholder: 'Search items…', state: ui, key: 'itemFilter',
+        container: grid, rowSelector: '.item-block', noun: 'items',
+        read: (index) => itemHaystack(bill.items[index] || {}),
+      }) : null,
+
+      rows.length ? grid : h('p.small.dim', {}, 'No items yet.'),
+
       h('div.row', { style: { marginTop: '12px' } },
         h('button.btn.btn-sm', {
           type: 'button',
           onclick: () => {
             bill.items.push(newItem());
+            ui.itemFilter = '';   // otherwise the new row lands behind a filter
             // Land the cursor in the new row's name field rather than making
             // people hunt for it after the list reflows.
             fx.rerender(`item-label-${bill.items.length - 1}`);
           },
         }, '+ Add item'),
         h('span.small.faint', {}, 'Tax and tip get split in proportion to what each person ordered.')),
+
+      // What happens to a line nobody ticked. Worth a control rather than a
+      // rule you have to know: sharing it out silently moves everybody's total
+      // and nothing on the page says it happened.
+      h('div.unclaimed-rule', {},
+        h('div.row-tight', {},
+          h('span.small.faint', {}, 'Items nobody picks:'),
+          h('div.seg', {}, ...[
+            ['unassigned', 'Leave unassigned'],
+            ['even', 'Split evenly'],
+          ].map(([mode, text]) => h('button', {
+            type: 'button', 'aria-pressed': bill.unclaimed_mode === mode ? 'true' : 'false',
+            onclick: () => { bill.unclaimed_mode = mode; fx.rerender(); },
+          }, text)))),
+        h('span.hint', { style: { display: 'block', marginTop: '5px' } },
+          bill.unclaimed_mode === 'even'
+            ? 'Anything untouched is shared out across everyone on the bill.'
+            : 'Anything untouched stays off everyone’s total and is shown on its own, '
+              + 'so you can see what is still to claim.'
+              + (unpicked ? ` ${unpicked} line${unpicked === 1 ? '' : 's'} right now.` : ''))),
     ),
   );
 }
@@ -710,17 +850,24 @@ function extrasCard(bill, symbol, fx) {
   );
 }
 
-function paidCard(bill, parties, symbol, currency, fx) {
-  const rows = bill.participants.map((participant) => {
-    const person = parties.find((p) => p.party === participant.party) || { name: '?' };
+function paidCard(bill, parties, symbol, currency, fx, ui) {
+  const list = h('div.pay-list');
+  const names = bill.participants.map(
+    (p) => ((parties.find((x) => x.party === p.party) || {}).name || '?'),
+  );
+
+  const rows = bill.participants.map((participant, index) => {
+    const name = names[index];
     const payment = bill.payments.find((p) => p.party === participant.party);
-    return h('div.person-row', {},
-      h('div.row-tight', {}, h('span.avatar', {}, initials(person.name)), h('span', {}, person.name)),
-      h('div.money-input', { style: { width: '120px' } },
+    return h('div.pay-row', {},
+      h('span.avatar.sm', {}, initials(name)),
+      h('span.grow.truncate', {}, name),
+      h('div.money-input', {},
         h('span.cur', {}, symbol),
         h('input', {
           type: 'text', inputmode: 'decimal', placeholder: '0.00',
           value: payment ? payment.amount : '',
+          'aria-label': `What ${name} paid`,
           oninput: (event) => {
             const raw = event.target.value;
             const existing = bill.payments.find((p) => p.party === participant.party);
@@ -729,17 +876,24 @@ function paidCard(bill, parties, symbol, currency, fx) {
             fx.preview();
           },
         })),
-      h('div'),
     );
   });
+  mount(list, ...rows);
 
   const paid = bill.payments.reduce((sum, p) => sum + (Number(p.amount) || 0), 0);
+  const payers = bill.payments.filter((p) => Number(p.amount)).length;
 
   return h('div.card', {},
     h('div.card-head', {}, h('h3', {}, 'Who paid'),
-      h('span.small.faint.right.money', {}, `${symbol}${paid.toFixed(2)} recorded`)),
+      h('span.small.faint.right.money', {},
+        payers ? `${symbol}${paid.toFixed(2)} from ${payers}` : 'nothing recorded')),
     h('div.card-body', {},
-      rows.length ? h('div', {}, ...rows) : h('p.small.dim', { style: { margin: 0 } }, 'Add people first.'),
+      rows.length >= 6 ? searchBox({
+        placeholder: 'Find a person…', state: ui, key: 'paidFilter',
+        container: list, rowSelector: '.pay-row', noun: 'people',
+        read: (index) => (names[index] || '').toLowerCase(),
+      }) : null,
+      rows.length ? list : h('p.small.dim', { style: { margin: 0 } }, 'Add people first.'),
       h('p.small.faint', { style: { margin: '10px 0 0' } },
         'Usually one person covers the whole thing. Leave the rest blank — the balances work it out.'),
     ),
@@ -1205,9 +1359,23 @@ function drawPreview(box, result, parties, currency, bill, errorMessage) {
     line(extra.label + (extra.mode === 'percent' ? ` (${pctLabel(extra.percent)})` : ''), extra.cents);
   }
 
-  add(box, 
+  add(box,
     ...lines,
     h('div.totals-line.total', {}, h('span', {}, 'Total'), h('span.v', {}, money(totals.total_cents, currency))),
+    // The one number that would otherwise go unnoticed: money on the receipt
+    // that is on nobody's total. Sits right under the total, where the gap
+    // between the two is obvious.
+    totals.unassigned_cents
+      ? h('div.totals-line.unassigned', {},
+          h('span', {}, 'Nobody has claimed',
+            h('div.tiny.faint', {},
+              [totals.unassigned_items
+                ? `${totals.unassigned_items} item${totals.unassigned_items === 1 ? '' : 's'}`
+                : 'part of a divided line',
+              totals.tax_cents || totals.tip_cents ? 'with their tax and tip' : null,
+              ].filter(Boolean).join(', '))),
+          h('span.v', {}, money(totals.unassigned_cents, currency)))
+      : null,
     totals.paid_total_cents
       ? h('div.totals-line', {}, h('span.dim', {}, 'Paid so far'),
           h('span.v', {}, money(totals.paid_total_cents, currency)))
@@ -1223,15 +1391,17 @@ function drawPreview(box, result, parties, currency, bill, errorMessage) {
     for (const line of result.breakdown) {
       add(box, h('div', { style: { padding: '7px 0', borderBottom: '1px solid var(--border)' } },
         h('div.spread', {},
-          h('span.small.strong.truncate', {}, line.name),
+          h('span.small.strong.truncate', {}, line.exempt ? `🎂 ${line.name}` : line.name),
           h('span.money.strong', {}, money(line.owed_cents, currency))),
-        h('div.tiny.faint', {}, [
-          line.base_cents ? `base ${money(line.base_cents, currency)}` : null,
-          line.discount_cents ? `disc ${money(line.discount_cents, currency)}` : null,
-          line.tax_cents ? `tax ${money(line.tax_cents, currency)}` : null,
-          line.tip_cents ? `tip ${money(line.tip_cents, currency)}` : null,
-          line.extras_cents ? `extras ${money(line.extras_cents, currency)}` : null,
-        ].filter(Boolean).join(' · ') || 'nothing yet'),
+        line.exempt
+          ? h('div.tiny.pos', {}, 'not paying — covered by everyone else')
+          : h('div.tiny.faint', {}, [
+              line.base_cents ? `base ${money(line.base_cents, currency)}` : null,
+              line.discount_cents ? `disc ${money(line.discount_cents, currency)}` : null,
+              line.tax_cents ? `tax ${money(line.tax_cents, currency)}` : null,
+              line.tip_cents ? `tip ${money(line.tip_cents, currency)}` : null,
+              line.extras_cents ? `extras ${money(line.extras_cents, currency)}` : null,
+            ].filter(Boolean).join(' · ') || 'nothing yet'),
         line.paid_cents ? h('div.tiny', { class: line.balance_cents >= 0 ? 'pos' : 'neg' },
           line.balance_cents === 0 ? 'square'
             : line.balance_cents > 0

@@ -233,6 +233,11 @@ function billsTab(data, group) {
               .filter(Boolean).join(' · '))),
         h('span.stack-sm', { style: { textAlign: 'right' } },
           h('span.money.strong', {}, money(bill.total_cents, bill.currency)),
+          // Money on this bill that is on nobody's total: the bill is not
+          // finished, and that is worth seeing without opening it.
+          bill.unassigned_cents
+            ? h('span.badge.warn', {}, `${money(bill.unassigned_cents, bill.currency)} unclaimed`)
+            : null,
           bill.unpaid_cents === 0
             ? h('span.badge.pos', {}, 'paid')
             : bill.paid_total_cents === 0

@@ -282,6 +282,7 @@ def _public_payload(conn: sqlite3.Connection, share: sqlite3.Row) -> dict[str, A
             "claimed_items": claimed_counts.get(key, 0),
             "owed_cents": result["per_party"].get(key, {}).get("owed_cents", 0),
             "paid_cents": result["per_party"].get(key, {}).get("paid_cents", 0),
+            "exempt": bool(result["per_party"].get(key, {}).get("exempt")),
         }
         for key in on_bill
     ]
@@ -320,6 +321,9 @@ def _public_payload(conn: sqlite3.Connection, share: sqlite3.Row) -> dict[str, A
             "bill_date": bill["bill_date"],
             "currency": bill["currency"],
             "split_mode": bill["split_mode"],
+            # The guest page's running estimate has to follow the same rule the
+            # server does, or the two quote different figures.
+            "unclaimed_mode": bill["unclaimed_mode"],
             "notes": bill["notes"],
             "category_name": bill["category_name"],
         },
@@ -348,6 +352,9 @@ def _public_payload(conn: sqlite3.Connection, share: sqlite3.Row) -> dict[str, A
         "totals": {
             "subtotal_cents": result["subtotal_cents"],
             "total_cents": result["total_cents"],
+            # What is still on nobody's total - so a guest can see the bill is
+            # not finished and go back for the thing they forgot to tick.
+            "unassigned_cents": result["unassigned_cents"],
         },
         "warnings": result["warnings"],
         "share": {

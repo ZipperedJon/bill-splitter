@@ -21,6 +21,7 @@ router = APIRouter(prefix="/api", tags=["bills"])
 
 SPLIT_MODES = {"even", "shares", "itemized"}
 CHARGE_MODES = {"none", "percent", "amount"}
+UNCLAIMED_MODES = {"unassigned", "even"}
 
 
 class ChargeIn(BaseModel):
@@ -65,6 +66,8 @@ class ItemIn(BaseModel):
 class ParticipantIn(BaseModel):
     party: str = Field(min_length=3, max_length=32)
     weight: float = 1
+    # The birthday rule: they pay nothing, everybody else covers their share.
+    exempt: bool = False
 
 
 class PaymentIn(BaseModel):
@@ -79,6 +82,8 @@ class BillIn(BaseModel):
     bill_date: str = Field(default="", max_length=10)
     currency: str = Field(default="", max_length=8)
     split_mode: str = "even"
+    # What happens to an item nobody ticked. Defaults to leaving it unassigned.
+    unclaimed_mode: str = "unassigned"
     subtotal: Any = 0
     discount: DiscountIn = Field(default_factory=DiscountIn)
     tax: ChargeIn = Field(default_factory=ChargeIn)
@@ -113,6 +118,10 @@ def _percent(value: Any, what: str) -> float:
 def _validate(payload: BillIn, parties: dict[str, dict[str, Any]]) -> None:
     if payload.split_mode not in SPLIT_MODES:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Unknown split mode.")
+    if payload.unclaimed_mode not in UNCLAIMED_MODES:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST, "Unclaimed items must be left unassigned or split evenly."
+        )
     for charge, name in ((payload.discount, "Discount"), (payload.tax, "Tax"), (payload.tip, "Tip")):
         if charge.mode not in CHARGE_MODES:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, f"{name} mode must be none, percent or amount.")
@@ -142,6 +151,12 @@ def _validate(payload: BillIn, parties: dict[str, dict[str, Any]]) -> None:
     if payload.split_mode == "shares" and not any(p.weight > 0 for p in payload.participants):
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST, "At least one person needs a share above zero."
+        )
+
+    if payload.participants and all(p.exempt for p in payload.participants):
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "Everybody on this bill is marked as not paying - somebody has to cover it.",
         )
 
     if payload.discount.target != "all" and payload.discount.target not in seen:
@@ -179,7 +194,7 @@ def _write_bill(
     now = int(time.time())
     conn.execute(
         """UPDATE bills SET title=?, category_id=?, notes=?, bill_date=?, currency=?,
-                            split_mode=?, subtotal_cents=?,
+                            split_mode=?, unclaimed_mode=?, subtotal_cents=?,
                             discount_mode=?, discount_percent=?, discount_cents=?,
                             discount_target=?,
                             tax_mode=?, tax_percent=?, tax_cents=?,
@@ -193,6 +208,7 @@ def _write_bill(
             payload.bill_date or time.strftime("%Y-%m-%d"),
             currency,
             payload.split_mode,
+            payload.unclaimed_mode,
             _money(payload.subtotal, "Subtotal"),
             payload.discount.mode,
             _percent(payload.discount.percent, "Discount"),
@@ -217,8 +233,8 @@ def _write_bill(
 
     for participant in payload.participants:
         conn.execute(
-            "INSERT INTO bill_participants(bill_id, party, weight) VALUES (?,?,?)",
-            (bill_id, participant.party, participant.weight),
+            "INSERT INTO bill_participants(bill_id, party, weight, exempt) VALUES (?,?,?,?)",
+            (bill_id, participant.party, participant.weight, int(participant.exempt)),
         )
 
     order = 0
@@ -436,8 +452,13 @@ def preview_bill(
 
     result = splitter.compute_bill(
         split_mode=payload.split_mode if payload.split_mode in SPLIT_MODES else "even",
+        unclaimed_mode=(
+            payload.unclaimed_mode if payload.unclaimed_mode in UNCLAIMED_MODES else "unassigned"
+        ),
         subtotal_cents=_money(payload.subtotal, "Subtotal"),
-        participants=[{"party": p.party, "weight": p.weight} for p in known],
+        participants=[
+            {"party": p.party, "weight": p.weight, "exempt": p.exempt} for p in known
+        ],
         items=preview_items,
         discount={
             "mode": payload.discount.mode,

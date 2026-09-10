@@ -29,6 +29,12 @@ from typing import Any, Iterable, Sequence
 
 WEIGHT_SCALE = 10_000  # weights become integers, keeping allocation exact
 
+# A bucket, not a person: it holds lines nobody has claimed. It takes its share
+# of tax and tip like anybody else, so the bill still adds up exactly, but it is
+# reported on its own rather than being quietly charged to the table. Cannot
+# collide with a real party key, which is always 'u:<id>' or 'g:<id>'.
+UNASSIGNED = "?"
+
 
 def round_half_up(value: Decimal) -> int:
     return int(value.quantize(Decimal("1"), rounding=ROUND_HALF_UP))
@@ -139,17 +145,24 @@ def compute_bill(
     tip: dict[str, Any] | None = None,
     extras: Iterable[dict[str, Any]] = (),
     payments: Iterable[dict[str, Any]] = (),
+    unclaimed_mode: str = "unassigned",
 ) -> dict[str, Any]:
     """Compute a full bill breakdown.
 
-    participants: [{"party": "u:1", "weight": 1}]
+    participants: [{"party": "u:1", "weight": 1, "exempt": False}]
+                  `exempt` is the birthday rule: that person pays nothing and
+                  their share is covered by everybody else.
     items:        [{"id": 1, "label": "Steak", "amount_cents": 3200, "portions": 1,
                     "parent_id": None, "shares": {"u:1": 1}}]
-                  An item with no shares is split evenly across all participants.
                   A sub-item (parent_id set) carries no shares of its own and
                   follows whoever claimed its parent.
                   `portions` divides a line into individually claimable parts;
                   a share's weight is how many of them that person took.
+    unclaimed_mode: what happens to a line nobody has ticked.
+                  "unassigned" (default) parks it - reported as unassigned_cents
+                  and charged to nobody, because guessing that everyone shared
+                  the thing is usually wrong and always invisible.
+                  "even" is the old behaviour: split it across everyone.
     discount:     {"mode": "none|percent|amount", "percent": 8.875, "cents": 350,
                    "target": "all" | "<party>"} - a party takes the whole
                   discount, and a percentage is then of their share.
@@ -162,24 +175,35 @@ def compute_bill(
     parts = list(participants)
     parties = [str(p["party"]) for p in parts]
     weights = {str(p["party"]): float(p.get("weight", 1) or 0) for p in parts}
+    exempt = {str(p["party"]) for p in parts if p.get("exempt")}
     warnings: list[str] = []
 
     if not parties:
         return _empty_result(warnings=["No one is on this bill yet."])
+
+    if exempt and len(exempt) >= len(parties):
+        warnings.append(
+            "Everyone on this bill is marked as not paying, so that is being "
+            "ignored - somebody has to cover it."
+        )
+        exempt = set()
+    payers = [p for p in parties if p not in exempt]
 
     item_list = list(items)
     discount = discount or {}
     tax = tax or {}
     tip = tip or {}
     extra_list = list(extras)
+    leave_unclaimed = unclaimed_mode != "even"
 
     # --- 1. base shares ------------------------------------------------------
     base: dict[str, int] = {p: 0 for p in parties}
+    unclaimed_cents = 0   # what ends up on the UNASSIGNED bucket
+    unassigned_lines = 0  # top-level lines nobody ticked at all
 
     if split_mode == "itemized":
         subtotal = sum(int(it.get("amount_cents", 0)) for it in item_list)
         by_id = {it["id"]: it for it in item_list if it.get("id") is not None}
-        unassigned_lines = 0
 
         for item in item_list:
             amount = int(item.get("amount_cents", 0))
@@ -192,11 +216,16 @@ def compute_bill(
 
             if not shares:
                 # Nobody picked this line. Sub-items follow their parent, so only
-                # count the top-level lines or the message double-counts.
+                # count the top-level lines or the message double-counts - but do
+                # count their money, since an unclaimed burger takes its cheese
+                # with it.
                 if item.get("parent_id") is None:
                     unassigned_lines += 1
-                for party, cents in zip(parties, allocate(amount, [1.0] * len(parties))):
-                    base[party] += cents
+                if leave_unclaimed:
+                    unclaimed_cents += amount
+                else:
+                    for party, cents in zip(parties, allocate(amount, [1.0] * len(parties))):
+                        base[party] += cents
                 continue
 
             keys = [p for p in parties if p in shares]  # stable order
@@ -239,17 +268,31 @@ def compute_bill(
 
             unclaimed = prices[cursor:]
             if unclaimed:
-                # Portions nobody put their hand up for are treated like an
-                # unclaimed line: shared by everyone, same rule as elsewhere.
+                # Portions nobody put their hand up for follow the same rule as
+                # a whole unclaimed line.
                 left = sum(unclaimed)
-                for party, cents in zip(parties, allocate(left, [1.0] * len(parties))):
-                    base[party] += cents
-                warnings.append(
-                    f"{label}: {len(unclaimed)} of {portions} portions "
-                    f"({money(left)}) not taken by anyone - split evenly across everyone."
-                )
+                if leave_unclaimed:
+                    # Worth saying out loud even though the amount shows up in
+                    # unassigned_cents: the line looks claimed, and only this
+                    # says that part of it is not.
+                    unclaimed_cents += left
+                    warnings.append(
+                        f"{label}: {len(unclaimed)} of {portions} portions "
+                        f"({money(left)}) not taken by anyone - left unassigned."
+                    )
+                else:
+                    for party, cents in zip(parties, allocate(left, [1.0] * len(parties))):
+                        base[party] += cents
+                    warnings.append(
+                        f"{label}: {len(unclaimed)} of {portions} portions "
+                        f"({money(left)}) not taken by anyone - split evenly across everyone."
+                    )
 
-        if unassigned_lines:
+        # Only a warning when the engine has actually done something to
+        # people's totals. Leaving it unassigned is reported as a fact -
+        # unassigned_cents and unassigned_items - which every screen shows
+        # plainly, so saying it twice would just be noise.
+        if unassigned_lines and not leave_unclaimed:
             warnings.append(
                 f"{unassigned_lines} item{'s' if unassigned_lines != 1 else ''} "
                 "not assigned to anyone - split evenly across everyone."
@@ -263,12 +306,52 @@ def compute_bill(
         for party, cents in zip(parties, allocate(subtotal, w)):
             base[party] = cents
 
+    # --- 1b. whoever is not paying -------------------------------------------
+    # The birthday rule. Their share moves to the people who *are* paying, which
+    # is what "it's on us" means. Everything downstream then follows from their
+    # share being zero: tax and tip are apportioned by share, so they pick up
+    # none of it and end up owing exactly nothing.
+    if exempt:
+        covered = sum(base[party] for party in exempt)
+        for party in exempt:
+            base[party] = 0
+        if covered:
+            spread = (
+                [weights[p] for p in payers] if split_mode == "shares"
+                else [1.0] * len(payers)
+            )
+            for party, cents in zip(payers, allocate(covered, spread)):
+                base[party] += cents
+
+    # --- 1c. the unassigned bucket -------------------------------------------
+    # From here on everything is apportioned across `holders`: the people, plus
+    # the bucket when it holds something. The bucket behaves like a participant
+    # for tax and tip - so the arithmetic still closes exactly - and is pulled
+    # back out at the end to be reported on its own.
+    holders = list(parties)
+    if unclaimed_cents:
+        holders.append(UNASSIGNED)
+        base[UNASSIGNED] = unclaimed_cents
+
+    # Weights to fall back on when there is no subtotal to apportion against.
+    # Neither the bucket nor somebody who is not paying should collect a share
+    # of a bill that is nothing but a flat tip.
+    fallback = {p: (0.0 if p in exempt else weights[p]) for p in parties}
+    fallback[UNASSIGNED] = 0.0
+
     # --- 2. discount ---------------------------------------------------------
     # A discount aimed at one person (their coupon, their comped dish) comes off
     # their share alone, and a percentage then means a percentage *of their
     # share* - which is what "20% off my meal" means to a human.
     target = str(discount.get("target") or "all")
-    targeted = target in base
+    targeted = target in base and target != UNASSIGNED
+    if targeted and target in exempt:
+        # Their share is already zero, so there is nothing to take off. Say so
+        # rather than reporting it as a discount that got capped.
+        warnings.append(
+            "The discount is aimed at somebody who is not paying, so it has no effect."
+        )
+        discount = {"mode": "none"}
     discount_basis = base[target] if targeted else subtotal
 
     discount_cents = _amount_from(
@@ -287,26 +370,26 @@ def compute_bill(
         )
         discount_cents = discount_basis
 
-    discount_share: dict[str, int] = dict.fromkeys(parties, 0)
+    discount_share: dict[str, int] = dict.fromkeys(holders, 0)
     if discount_cents:
         if targeted:
             discount_share[target] = -discount_cents
         else:
-            w = _prop_weights(base, parties, weights)
-            for party, cents in zip(parties, allocate(-discount_cents, w)):
+            w = _prop_weights(base, holders, fallback)
+            for party, cents in zip(holders, allocate(-discount_cents, w)):
                 discount_share[party] = cents
 
     net_subtotal = subtotal - discount_cents
-    net: dict[str, int] = {p: base[p] + discount_share[p] for p in parties}
+    net: dict[str, int] = {p: base[p] + discount_share[p] for p in holders}
 
     # --- 3. tax --------------------------------------------------------------
     tax_cents = _amount_from(
         tax.get("mode", "none"), tax.get("percent", 0) or 0, tax.get("cents", 0) or 0, net_subtotal
     )
-    tax_share: dict[str, int] = dict.fromkeys(parties, 0)
+    tax_share: dict[str, int] = dict.fromkeys(holders, 0)
     if tax_cents:
-        w = _prop_weights(net, parties, weights)
-        for party, cents in zip(parties, allocate(tax_cents, w)):
+        w = _prop_weights(net, holders, fallback)
+        for party, cents in zip(holders, allocate(tax_cents, w)):
             tax_share[party] = cents
 
     # --- 4. tip --------------------------------------------------------------
@@ -315,14 +398,14 @@ def compute_bill(
     tip_cents = _amount_from(
         tip.get("mode", "none"), tip.get("percent", 0) or 0, tip.get("cents", 0) or 0, tip_base_cents
     )
-    tip_share: dict[str, int] = dict.fromkeys(parties, 0)
+    tip_share: dict[str, int] = dict.fromkeys(holders, 0)
     if tip_cents:
-        w = _prop_weights(net, parties, weights)
-        for party, cents in zip(parties, allocate(tip_cents, w)):
+        w = _prop_weights(net, holders, fallback)
+        for party, cents in zip(holders, allocate(tip_cents, w)):
             tip_share[party] = cents
 
     # --- 5. extras -----------------------------------------------------------
-    extras_share: dict[str, int] = dict.fromkeys(parties, 0)
+    extras_share: dict[str, int] = dict.fromkeys(holders, 0)
     extras_out: list[dict[str, Any]] = []
     for extra in extra_list:
         cents = _amount_from(
@@ -332,11 +415,16 @@ def compute_bill(
             net_subtotal,
         )
         split = extra.get("split", "even")
-        w = [1.0] * len(parties) if split == "even" else _prop_weights(net, parties, weights)
-        per_party: dict[str, int] = {}
-        for party, amount in zip(parties, allocate(cents, w)):
+        if split == "even":
+            # A flat fee belongs to the people at the table - not to the
+            # unclaimed bucket, and not to whoever is not paying.
+            w = [0.0 if (p in exempt or p == UNASSIGNED) else 1.0 for p in holders]
+        else:
+            w = _prop_weights(net, holders, fallback)
+        per_holder: dict[str, int] = {}
+        for party, amount in zip(holders, allocate(cents, w)):
             extras_share[party] += amount
-            per_party[party] = amount
+            per_holder[party] = amount
         extras_out.append(
             {
                 "id": extra.get("id"),
@@ -345,7 +433,8 @@ def compute_bill(
                 "percent": float(extra.get("percent", 0) or 0),
                 "split": split,
                 "cents": cents,
-                "per_party": per_party,
+                # People only; the bucket's slice is reported as unassigned.
+                "per_party": {k: v for k, v in per_holder.items() if k != UNASSIGNED},
             }
         )
     extras_total = sum(e["cents"] for e in extras_out)
@@ -369,9 +458,15 @@ def compute_bill(
         )
     paid_total = sum(paid.values())
 
-    per_party: dict[str, dict[str, int]] = {}
+    def owed_by(party: str) -> int:
+        return (
+            base[party] + discount_share[party] + tax_share[party]
+            + tip_share[party] + extras_share[party]
+        )
+
+    per_party: dict[str, dict[str, Any]] = {}
     for party in parties:
-        owed = base[party] + discount_share[party] + tax_share[party] + tip_share[party] + extras_share[party]
+        owed = owed_by(party)
         per_party[party] = {
             "base_cents": base[party],
             "discount_cents": discount_share[party],
@@ -382,10 +477,15 @@ def compute_bill(
             "owed_cents": owed,
             "paid_cents": paid[party],
             "balance_cents": paid[party] - owed,  # >0 they are owed money
+            "exempt": party in exempt,
         }
 
+    unassigned = owed_by(UNASSIGNED) if UNASSIGNED in holders else 0
+
     # Belt-and-braces: allocation guarantees this, but a bug here is silent money loss.
-    assert sum(v["owed_cents"] for v in per_party.values()) == total, "split does not sum to total"
+    assert sum(v["owed_cents"] for v in per_party.values()) + unassigned == total, (
+        "split does not sum to total"
+    )
 
     return {
         "subtotal_cents": subtotal,
@@ -399,6 +499,12 @@ def compute_bill(
         "total_cents": total,
         "paid_total_cents": paid_total,
         "unpaid_cents": total - paid_total,
+        # Nobody's yet: the unclaimed lines plus their share of tax and tip.
+        "unassigned_cents": unassigned,
+        # How many lines are in that bucket. Zero when they were shared out
+        # instead, so the pair always describes the same thing.
+        "unassigned_items": unassigned_lines if leave_unclaimed else 0,
+        "exempt_parties": sorted(exempt),
         "per_party": per_party,
         "warnings": warnings,
     }
@@ -417,6 +523,9 @@ def _empty_result(warnings: list[str] | None = None) -> dict[str, Any]:
         "total_cents": 0,
         "paid_total_cents": 0,
         "unpaid_cents": 0,
+        "unassigned_cents": 0,
+        "unassigned_items": 0,
+        "exempt_parties": [],
         "per_party": {},
         "warnings": warnings or [],
     }

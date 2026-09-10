@@ -353,6 +353,11 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; white-sp
 .item .title { font-weight: 580; }
 .item .meta { color: var(--text-faint); font-size: .82rem; margin-top: 1px; }
 
+/* A line, or a whole slice of a bill, that nobody has put their hand up for. */
+.item .meta.unclaimed { color: var(--warn); font-weight: 600; }
+.unclaimed-row, .unclaimed-row:hover { background: var(--warn-soft); }
+.unclaimed-row .title, .unclaimed-row .meta { color: var(--warn); }
+
 .cat-icon {
   display: grid; place-items: center; width: 36px; height: 36px; flex: none;
   border-radius: 10px; background: var(--surface-2); font-size: 1.05rem;
@@ -410,6 +415,31 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; white-sp
 }
 .item-row .who { grid-column: 1 / -1; display: flex; gap: 6px; flex-wrap: wrap; }
 .item-row .who .label-inline { font-size: .78rem; color: var(--text-faint); align-self: center; margin-right: 2px; }
+/* A line nobody has ticked is money sitting on nobody's total, so say so in
+   the colour the rest of the app uses for "needs attention". */
+.item-row .who .label-inline.unclaimed { color: var(--warn); font-weight: 600; }
+
+.unclaimed-rule { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border); }
+
+/* --- live search over a long list ---------------------------------------- */
+.list-search { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; }
+.list-search input { flex: 1 1 auto; min-width: 0; min-height: 34px; padding: 6px 11px; font-size: .9rem; }
+.list-search > span { flex: none; white-space: nowrap; }
+.list-search .btn { flex: none; }
+
+/* --- who paid ------------------------------------------------------------
+   One compact row per person and a scroller: on a fourteen-person bill this
+   card is mostly empty boxes, and it should not be the tallest thing on the
+   page just because everybody is listed. */
+.pay-list { max-height: 320px; overflow-y: auto; margin: 0 -4px; padding: 0 4px; }
+.pay-row {
+  display: grid; gap: 9px; align-items: center; padding: 6px 0;
+  grid-template-columns: 24px minmax(0, 1fr) 104px;
+}
+.pay-row + .pay-row { border-top: 1px solid var(--border); }
+.pay-row .money-input input { min-height: 32px; padding: 5px 9px 5px 21px; font-size: .9rem; }
+.pay-row .money-input .cur { left: 8px; font-size: .82rem; }
+.avatar.sm { width: 24px; height: 24px; font-size: .64rem; }
 
 .item-actions { margin-top: 8px; gap: 6px; }
 .item-actions .btn { padding-left: 6px; padding-right: 6px; }
@@ -460,6 +490,17 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; white-sp
 .totals-line.total { padding-top: 10px; margin-top: 6px; border-top: 1px solid var(--border);
   font-size: 1.12rem; font-weight: 680; }
 .totals-line .v { font-variant-numeric: tabular-nums; }
+
+/* Money on the receipt that is on nobody's total. Sits under the total, where
+   the gap between the two is the whole point. */
+.totals-line.unassigned {
+  align-items: flex-start; margin-top: 8px; padding: 9px 11px;
+  border: 1px solid color-mix(in srgb, var(--warn) 35%, transparent);
+  border-radius: var(--radius-sm); background: var(--warn-soft); color: var(--warn);
+  font-weight: 600;
+}
+.totals-line.unassigned .v { font-weight: 680; }
+.totals-line.unassigned .faint { color: inherit; opacity: .8; font-weight: 400; }
 
 /* --- toasts and modal ---------------------------------------------------- */
 .toasts {

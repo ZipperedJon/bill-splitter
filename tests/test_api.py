@@ -420,6 +420,79 @@ def test_cannot_take_more_portions_than_exist():
     assert "more than the 2 portions" in r.json()["detail"]
 
 
+def test_unclaimed_items_are_left_unassigned_and_the_choice_round_trips():
+    client = fresh_client()
+    signup_admin(client)
+    group_id, jon, sam = _two_user_group(client)
+
+    body = {
+        "title": "Half-typed dinner", "split_mode": "itemized",
+        "items": [
+            {"label": "Steak", "amount": "30.00", "shares": {jon: 1}},
+            {"label": "Wine", "amount": "20.00", "shares": {}},
+        ],
+        "participants": [{"party": jon}, {"party": sam}],
+    }
+    r = client.post(f"/api/groups/{group_id}/bills", json=body)
+    assert r.status_code == 200, r.text
+    bill_id = r.json()["bill_id"]
+
+    detail = client.get(f"/api/bills/{bill_id}").json()
+    assert detail["bill"]["unclaimed_mode"] == "unassigned", "the default"
+    lines = {b["party"]: b for b in detail["breakdown"]}
+    assert lines[sam]["owed_cents"] == 0, "Sam did not order the wine"
+    assert detail["totals"]["unassigned_cents"] == 2000
+    assert detail["totals"]["total_cents"] == 5000
+
+    # Ask for the old behaviour and the wine goes back to being shared.
+    r = client.put(f"/api/bills/{bill_id}", json={**body, "unclaimed_mode": "even"})
+    assert r.status_code == 200, r.text
+    lines = {b["party"]: b for b in r.json()["breakdown"]}
+    assert lines[jon]["owed_cents"] == 3000 + 1000
+    assert lines[sam]["owed_cents"] == 1000
+    assert r.json()["totals"]["unassigned_cents"] == 0
+    assert client.get(f"/api/bills/{bill_id}").json()["bill"]["unclaimed_mode"] == "even"
+
+
+def test_a_birthday_round_trips_and_is_covered_by_everybody_else():
+    client = fresh_client()
+    signup_admin(client)
+    group_id, jon, sam = _two_user_group(client)
+
+    r = client.post(
+        f"/api/groups/{group_id}/bills",
+        json={
+            "title": "Sam's birthday", "split_mode": "even", "subtotal": "60.00",
+            "tax": {"mode": "percent", "percent": 10},
+            "participants": [{"party": jon}, {"party": sam, "exempt": True}],
+        },
+    )
+    assert r.status_code == 200, r.text
+    bill_id = r.json()["bill_id"]
+
+    detail = client.get(f"/api/bills/{bill_id}").json()
+    lines = {b["party"]: b for b in detail["breakdown"]}
+    assert lines[sam]["owed_cents"] == 0
+    assert lines[sam]["exempt"] is True
+    assert lines[jon]["owed_cents"] == 6600
+    assert next(p for p in detail["participants"] if p["party"] == sam)["exempt"] is True
+
+
+def test_a_bill_where_nobody_is_paying_is_refused():
+    client = fresh_client()
+    signup_admin(client)
+    group_id, jon, sam = _two_user_group(client)
+    r = client.post(
+        f"/api/groups/{group_id}/bills",
+        json={
+            "title": "On the house", "split_mode": "even", "subtotal": "60.00",
+            "participants": [{"party": jon, "exempt": True}, {"party": sam, "exempt": True}],
+        },
+    )
+    assert r.status_code == 400
+    assert "somebody has to cover it" in r.json()["detail"]
+
+
 def test_targeted_discount_round_trip():
     client = fresh_client()
     signup_admin(client)

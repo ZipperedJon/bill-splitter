@@ -211,10 +211,25 @@ def test_a_guest_picks_their_items_and_the_split_follows():
     # The owner sees exactly the same numbers.
     detail = client.get(f"/api/bills/{bill['bill_id']}").json()
     lines = {b["name"]: b for b in detail["breakdown"]}
-    # Wine is split between Dana and Marcus; the unclaimed ribeye spreads over all.
-    assert lines["Dana"]["base_cents"] == 1400 + 3000 + 1600   # salad + wine/2 + ribeye/3
-    assert lines["Marcus"]["base_cents"] == 3200 + 3000 + 1600
-    assert sum(b["owed_cents"] for b in detail["breakdown"]) == detail["totals"]["total_cents"]
+    # Wine is split between Dana and Marcus. Nobody has claimed the ribeye, so
+    # it stays off everybody's total rather than quietly landing on all three.
+    assert lines["Dana"]["base_cents"] == 1400 + 3000        # salad + wine/2
+    assert lines["Marcus"]["base_cents"] == 3200 + 3000      # salmon + wine/2
+    assert lines["jon"]["base_cents"] == 0
+    totals = detail["totals"]
+    assert totals["unassigned_cents"] == 4800 + 480 + 960    # ribeye, its tax and tip
+    assert (
+        sum(b["owed_cents"] for b in detail["breakdown"]) + totals["unassigned_cents"]
+        == totals["total_cents"]
+    )
+
+    # And the guests can see there is still something to claim.
+    assert data["totals"]["unassigned_cents"] == 6240
+    ribeye = next(i for i in data["items"] if i["label"] == "Ribeye")
+    assert ribeye["claimed_by"] == []
+    # The share page runs its own estimate while you tick, so it needs to know
+    # which rule this bill follows or it will quote a different figure.
+    assert data["bill"]["unclaimed_mode"] == "unassigned"
 
 
 def test_claims_replace_only_that_persons_picks():
@@ -332,9 +347,14 @@ def test_claiming_a_parent_through_the_link_picks_up_its_sub_items():
 
     detail = client.get(f"/api/bills/{bill['bill_id']}").json()
     lines = {b["name"]: b for b in detail["breakdown"]}
-    # Burger + bacon land on Dana; the unclaimed beer line splits evenly.
-    assert lines["Dana"]["base_cents"] == 1400 + 900
-    assert sum(b["owed_cents"] for b in detail["breakdown"]) == detail["totals"]["total_cents"]
+    # Burger + bacon land on Dana; the beer nobody claimed stays unassigned.
+    assert lines["Dana"]["base_cents"] == 1400
+    assert lines["jon"]["base_cents"] == 0
+    assert detail["totals"]["unassigned_cents"] == 1800
+    assert (
+        sum(b["owed_cents"] for b in detail["breakdown"])
+        + detail["totals"]["unassigned_cents"] == detail["totals"]["total_cents"]
+    )
 
 
 def test_a_guest_takes_some_portions_of_a_divided_line():
@@ -356,9 +376,10 @@ def test_a_guest_takes_some_portions_of_a_divided_line():
 
     detail = client.get(f"/api/bills/{bill['bill_id']}").json()
     lines = {b["name"]: b for b in detail["breakdown"]}
-    # Two of three beers plus half the unclaimed burger line.
-    assert lines["Dana"]["base_cents"] == 1200 + 700
-    assert lines["jon"]["base_cents"] == 600 + 700
+    # Two of three beers each cost a beer; the burger nobody took is unassigned.
+    assert lines["Dana"]["base_cents"] == 1200
+    assert lines["jon"]["base_cents"] == 600
+    assert detail["totals"]["unassigned_cents"] == 1400   # burger + bacon
 
 
 def test_a_portion_costs_a_portion_through_the_share_link():
@@ -375,11 +396,15 @@ def test_a_portion_costs_a_portion_through_the_share_link():
 
     detail = client.get(f"/api/bills/{bill['bill_id']}").json()
     lines = {b["name"]: b for b in detail["breakdown"]}
-    # 6.00 for her beer, plus her half of the two nobody took (12.00) and half
-    # of the unclaimed burger line (14.00).
-    assert lines["Dana"]["base_cents"] == 600 + 600 + 700
-    assert lines["jon"]["base_cents"] == 600 + 700
-    assert sum(b["owed_cents"] for b in detail["breakdown"]) == detail["totals"]["total_cents"]
+    # 6.00 for her beer and nothing else: the two beers nobody took and the
+    # untouched burger line are both left unassigned.
+    assert lines["Dana"]["base_cents"] == 600
+    assert lines["jon"]["base_cents"] == 0
+    assert detail["totals"]["unassigned_cents"] == 1200 + 1400
+    assert (
+        sum(b["owed_cents"] for b in detail["breakdown"])
+        + detail["totals"]["unassigned_cents"] == detail["totals"]["total_cents"]
+    )
 
 
 def test_a_guest_cannot_take_more_portions_than_the_line_has():

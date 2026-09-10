@@ -14,6 +14,12 @@ import {
   niceDate, toast,
 } from './util.js';
 
+/** "Aaron" / "Aaron and Ben" / "Aaron, Ben and Cam". */
+function listNames(names) {
+  if (names.length <= 1) return names[0] || '';
+  return `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`;
+}
+
 const TOKEN = decodeURIComponent(location.pathname.replace(/^\/s\//, '').replace(/\/$/, ''));
 const STORE_KEY = `billsplit.share.${TOKEN}`;
 
@@ -116,9 +122,10 @@ function receipt(data) {
         ...item.sub_items.map((sub) => h('div.meta', {},
           `↳ ${sub.label}`,
           sub.amount_cents ? ` ${money(sub.amount_cents, currency)}` : '')),
-        h('div.meta', {}, item.claimed_by.length
-          ? `${item.claimed_by.length} ${item.claimed_by.length === 1 ? 'person' : 'people'}`
-          : 'nobody yet')),
+        h('div.meta', { class: item.claimed_by.length ? null : 'unclaimed' },
+          item.claimed_by.length
+            ? `${item.claimed_by.length} ${item.claimed_by.length === 1 ? 'person' : 'people'}`
+            : 'nobody has picked this')),
       h('span.money', {}, money(item.line_total_cents, currency))))),
     data.charges.length ? h('div.card-body.tight', {},
       ...data.charges.map((charge) => h('div.totals-line', {},
@@ -250,12 +257,17 @@ function renderPicker() {
   );
 
   const nameOf = (party) => (data.people.find((p) => p.party === party) || {}).name;
+  const notPaying = data.people.filter((p) => p.exempt).map((p) => p.name);
 
   const totalBox = h('div.card.card-body');
   const drawTotal = () => {
     let raw = 0;
     let count = 0;
     const headcount = Math.max(1, data.people.length);
+    // Whether anything nobody ticks lands on the table or is left unassigned.
+    // Following the bill's own setting is what stops this estimate quoting a
+    // different figure from the one the server puts on the next screen.
+    const shareOutTheRest = data.bill.unclaimed_mode === 'even';
 
     for (const item of data.items) {
       const mine = state.taken.get(item.id) || 0;
@@ -265,18 +277,20 @@ function renderPicker() {
 
       if (item.portions > 1) {
         // Priced per portion, matching the server's arithmetic exactly: what
-        // you took costs what it costs, and portions nobody took are shared by
-        // the whole table.
+        // you took costs what it costs.
         if (mine > 0) { raw += portionsCost(item.line_total_cents, item.portions, mine); count += 1; }
         const spare = Math.max(0, item.portions - mine - others);
-        if (spare > 0) {
+        if (spare > 0 && shareOutTheRest) {
           const claimedCost = portionsCost(item.line_total_cents, item.portions, mine + others);
           raw += (item.line_total_cents - claimedCost) / headcount;
         }
         continue;
       }
 
-      if (mine <= 0) continue;
+      if (mine <= 0) {
+        if (shareOutTheRest && others === 0) raw += item.line_total_cents / headcount;
+        continue;
+      }
       count += 1;
       // A shared whole line splits between everyone who ticked it.
       raw += item.line_total_cents / (mine + others);
@@ -287,7 +301,13 @@ function renderPicker() {
           h('div.faint.tiny', {}, `${count} of ${data.items.length}`)),
         h('span.strong', { style: { fontSize: '1.35rem' } }, money(Math.round(raw), currency))),
       h('p.tiny.faint', { style: { margin: '8px 0 0' } },
-        'Before tax, tip and fees are shared out. Your final figure is on the next screen.'),
+        'Before tax, tip and fees are shared out'
+        // Covering somebody moves the final figure too, so name it here rather
+        // than letting the next screen come as a surprise.
+        + (notPaying.length
+          ? `, and before ${listNames(notPaying)}’s share is covered`
+          : '')
+        + '. Your final figure is on the next screen.'),
     );
   };
 
@@ -503,10 +523,22 @@ function renderDone() {
             person.party === me.party
               ? h('span.badge.accent', { style: { marginLeft: '7px' } }, 'you')
               : null),
-          h('div.meta', {}, person.claimed_items
-            ? `${person.claimed_items} item${person.claimed_items === 1 ? '' : 's'}`
-            : data.itemized ? 'nothing picked yet' : 'even share')),
-        h('span.money.strong', {}, money(person.owed_cents, currency))))),
+          h('div.meta', {}, person.exempt
+            ? 'not paying — covered by everyone else'
+            : person.claimed_items
+              ? `${person.claimed_items} item${person.claimed_items === 1 ? '' : 's'}`
+              : data.itemized ? 'nothing picked yet' : 'even share')),
+        h('span.money.strong', {}, money(person.owed_cents, currency)))),
+        // Without this the list plainly does not add up to the total, and the
+        // reason it does not is exactly what people need to see.
+        data.totals.unassigned_cents
+          ? h('div.item.unclaimed-row', { style: { cursor: 'default' } },
+              h('span.avatar', { style: { background: 'var(--warn)' } }, '?'),
+              h('span.grow', {},
+                h('div.title', {}, 'Nobody has claimed'),
+                h('div.meta', {}, 'tap “Change my picks” if something was yours')),
+              h('span.money.strong', {}, money(data.totals.unassigned_cents, currency)))
+          : null),
     ),
 
     data.warnings.length

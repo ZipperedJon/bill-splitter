@@ -74,10 +74,21 @@ CREATE TABLE bill_items (
 )
 """
 
+# bill_participants at v1: no `exempt` (the birthday rule).
+V1_PARTICIPANTS = """
+CREATE TABLE bill_participants (
+    id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    bill_id INTEGER NOT NULL REFERENCES bills(id) ON DELETE CASCADE,
+    party   TEXT NOT NULL,
+    weight  REAL NOT NULL DEFAULT 1
+)
+"""
+
 # Everything schema v1 did not have, which the upgrade has to put in place.
 ADDED_SINCE_V1 = {
-    "bills": {"revision", "discount_target"},
+    "bills": {"revision", "discount_target", "unclaimed_mode"},
     "bill_items": {"parent_id", "portions"},
+    "bill_participants": {"exempt"},
 }
 
 
@@ -99,6 +110,11 @@ def make_v1_database() -> None:
         conn.execute("DROP TABLE bill_items")
         conn.execute(V1_ITEMS)
         conn.execute("CREATE INDEX idx_items_bill ON bill_items(bill_id, sort_order)")
+        conn.execute("DROP TABLE bill_participants")
+        conn.execute(V1_PARTICIPANTS)
+        conn.execute(
+            "CREATE UNIQUE INDEX idx_bp_bill_party ON bill_participants(bill_id, party)"
+        )
         conn.execute("UPDATE meta SET value='1' WHERE key='schema_version'")
 
         # Real data, so we can prove the upgrade does not lose any of it.
@@ -162,14 +178,15 @@ def test_a_v1_database_upgrades_and_keeps_its_data():
         assert bill["subtotal_cents"] == 5000
         assert bill["revision"] == 0, "existing rows start at revision 0"
         assert bill["discount_target"] == "all", "old bills discount everyone, as before"
+        assert bill["unclaimed_mode"] == "unassigned"
         item = conn.execute("SELECT * FROM bill_items WHERE id=1").fetchone()
         assert item["label"] == "Old salad"
         assert item["portions"] == 1, "an old item is one undivided portion"
         assert item["parent_id"] is None
         assert conn.execute("SELECT COUNT(*) AS n FROM users").fetchone()["n"] == 1
-        assert conn.execute(
-            "SELECT COUNT(*) AS n FROM bill_participants"
-        ).fetchone()["n"] == 1
+        person = conn.execute("SELECT * FROM bill_participants").fetchall()
+        assert len(person) == 1
+        assert person[0]["exempt"] == 0, "nobody was exempt before there was an exemption"
 
 
 def test_the_upgraded_database_actually_works():
