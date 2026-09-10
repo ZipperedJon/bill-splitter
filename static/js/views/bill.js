@@ -47,7 +47,7 @@ export async function renderBillEditor({ groupId, billId }) {
 
   // Screen state, deliberately not part of the bill: what the two search boxes
   // are narrowed to. Kept out here so rebuilding the form does not clear them.
-  const ui = { itemFilter: '', paidFilter: '' };
+  const ui = { itemFilter: '', paidFilter: '', openLines: new Set() };
 
   // --- live preview ---------------------------------------------------------
   const previewBox = h('div.stack-sm');
@@ -57,9 +57,9 @@ export async function renderBillEditor({ groupId, billId }) {
     try {
       const result = await api.preview({ ...toApi(bill), group_id: group.id });
       lastGood = result;
-      drawPreview(previewBox, result, parties, currency, bill);
+      drawPreview(previewBox, result, parties, currency, bill, ui);
     } catch (error) {
-      drawPreview(previewBox, lastGood, parties, currency, bill, error.message);
+      drawPreview(previewBox, lastGood, parties, currency, bill, ui, error.message);
     }
   }, 220);
 
@@ -1327,7 +1327,67 @@ async function mountSharePanel(box, billId, bill) {
 
 // --- preview -----------------------------------------------------------------
 
-function drawPreview(box, result, parties, currency, bill, errorMessage) {
+/**
+ * The lines behind one figure, on demand.
+ *
+ * Every entry comes from the split engine, written as it moved the money, so
+ * this cannot quote a number the total disagrees with. `open` is the editor's
+ * set of expanded rows: the preview redraws on every keystroke, and an answer
+ * you opened should not close itself while you carry on typing.
+ */
+function expandableLines({ key, open, lines, currency, nameOf, footer }) {
+  if (!lines || !lines.length) return null;
+  // On a bill that is not itemized there is one entry - their share of the
+  // subtotal - and the line above already says that number. Nothing to open.
+  if (lines.every((x) => x.kind === 'even' || x.kind === 'shares')) return null;
+
+  const details = h('div.who-had');
+  const count = `${lines.length} line${lines.length === 1 ? '' : 's'}`;
+
+  const draw = () => mount(details,
+    ...lines.map((entry) => {
+      const label = entry.kind === 'covering'
+        ? `Covering ${(entry.parties || []).map(nameOf).join(', ')}`
+        : entry.kind === 'even' ? 'Even share of the subtotal'
+          : entry.kind === 'shares' ? 'Their share of the subtotal'
+            : entry.label || 'An item';
+      const note = entry.kind === 'covering' || entry.kind === 'even' || entry.kind === 'shares'
+        ? ''
+        : entry.kind === 'unclaimed' ? 'nobody picked it'
+          : entry.units > 1 ? `${entry.units} portions`
+            : entry.sharers > 1 ? `shared by ${entry.sharers}` : '';
+      return h('div.who-had-line', {},
+        h('span.n.truncate', {}, label, note ? h('span.faint', {}, ` · ${note}`) : null),
+        h('span.v', {}, money(entry.cents, currency)));
+    }),
+    footer
+      ? h('div.who-had-line.sum', {}, h('span.n', {}, footer),
+          h('span.v', {}, money(lines.reduce((s, x) => s + x.cents, 0), currency)))
+      : null,
+  );
+
+  const isOpen = () => open.has(key);
+  const sign = h('span.pm', {}, isOpen() ? '−' : '+');
+  const button = h('button.btn.btn-sm.btn-ghost.expander', {
+    type: 'button', 'aria-expanded': isOpen() ? 'true' : 'false',
+    onclick: () => {
+      if (isOpen()) open.delete(key); else open.add(key);
+      // Built only when opened. Seventeen people times a dozen lines is a lot
+      // of DOM to make on every keystroke for something nobody is looking at.
+      if (isOpen()) draw();
+      details.hidden = !isOpen();
+      sign.textContent = isOpen() ? '−' : '+';
+      button.setAttribute('aria-expanded', isOpen() ? 'true' : 'false');
+    },
+  }, sign, count);
+
+  if (isOpen()) draw();
+  else details.hidden = true;
+
+  return [button, details];
+}
+
+function drawPreview(box, result, parties, currency, bill, ui, errorMessage) {
   clear(box);
   if (errorMessage) add(box, h('div.notice.bad', {}, errorMessage));
   if (!result) {
@@ -1336,6 +1396,7 @@ function drawPreview(box, result, parties, currency, bill, errorMessage) {
   }
 
   const totals = result.totals;
+  const nameOf = (party) => (parties.find((p) => p.party === party) || {}).name || 'someone';
   const lines = [];
   // Zero-value lines are simply left out; a receipt with "Tip $0.00" on it is noise.
   const line = (label, cents) => {
@@ -1366,15 +1427,20 @@ function drawPreview(box, result, parties, currency, bill, errorMessage) {
     // that is on nobody's total. Sits right under the total, where the gap
     // between the two is obvious.
     totals.unassigned_cents
-      ? h('div.totals-line.unassigned', {},
-          h('span', {}, 'Nobody has claimed',
-            h('div.tiny.faint', {},
-              [totals.unassigned_items
-                ? `${totals.unassigned_items} item${totals.unassigned_items === 1 ? '' : 's'}`
-                : 'part of a divided line',
-              totals.tax_cents || totals.tip_cents ? 'with their tax and tip' : null,
-              ].filter(Boolean).join(', '))),
-          h('span.v', {}, money(totals.unassigned_cents, currency)))
+      ? h('div.unassigned-block', {},
+          h('div.totals-line.unassigned', {},
+            h('span', {}, 'Nobody has claimed',
+              h('div.tiny.faint', {},
+                [totals.unassigned_items
+                  ? `${totals.unassigned_items} item${totals.unassigned_items === 1 ? '' : 's'}`
+                  : 'part of a divided line',
+                totals.tax_cents || totals.tip_cents ? 'with their tax and tip' : null,
+                ].filter(Boolean).join(', '))),
+            h('span.v', {}, money(totals.unassigned_cents, currency))),
+          // No footer: the band right above it is already that total.
+          expandableLines({
+            key: '?', open: ui.openLines, lines: totals.unassigned_lines, currency, nameOf,
+          }))
       : null,
     totals.paid_total_cents
       ? h('div.totals-line', {}, h('span.dim', {}, 'Paid so far'),
@@ -1407,6 +1473,11 @@ function drawPreview(box, result, parties, currency, bill, errorMessage) {
             : line.balance_cents > 0
               ? `paid ${money(line.paid_cents, currency)} — is owed ${moneyAbs(line.balance_cents, currency)}`
               : `paid ${money(line.paid_cents, currency)} — owes ${moneyAbs(line.balance_cents, currency)}`) : null,
+        // "Why do I owe $54.00?" answered in place.
+        expandableLines({
+          key: line.party, open: ui.openLines, lines: line.lines, currency, nameOf,
+          footer: line.exempt ? 'Covered for them' : null,
+        }),
       ));
     }
   }

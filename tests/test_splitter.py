@@ -667,6 +667,63 @@ def test_nothing_lost_with_sub_items_portions_and_targeted_discounts():
         ), "somebody who is not paying must never owe a cent"
 
 
+# --- what one person's figure is made of -------------------------------------
+
+def test_each_person_gets_the_lines_behind_their_share():
+    r = compute_bill(
+        split_mode="itemized",
+        participants=P("u:1", "u:2", "u:3"),
+        items=[
+            {"id": 1, "parent_id": None, "label": "Burger", "amount_cents": 1200,
+             "shares": {"u:1": 1}},
+            {"id": 2, "parent_id": 1, "label": "Add bacon", "amount_cents": 200, "shares": {}},
+            {"id": 3, "parent_id": None, "label": "Nachos", "amount_cents": 1000,
+             "shares": {"u:1": 1, "u:2": 1}},
+            {"id": 4, "parent_id": None, "label": "Wine", "amount_cents": 3000, "shares": {}},
+        ],
+        tax={"mode": "percent", "percent": 10},
+    )
+
+    jon = r["per_party"]["u:1"]["lines"]
+    assert [(x["label"], x["cents"]) for x in jon] == [
+        ("Burger", 1400),   # the bacon is folded into the burger, not its own line
+        ("Nachos", 500),
+    ]
+    assert next(x for x in jon if x["label"] == "Nachos")["sharers"] == 2
+    assert sum(x["cents"] for x in jon) == r["per_party"]["u:1"]["base_cents"]
+
+    assert r["per_party"]["u:3"]["lines"] == [], "he had nothing"
+
+    # And the unclaimed bucket lists what is still going spare.
+    assert [(x["label"], x["cents"], x["kind"]) for x in r["unassigned_lines"]] == [
+        ("Wine", 3000, "unclaimed"),
+    ]
+
+
+def test_covering_somebody_is_its_own_line_not_a_mystery_item():
+    r = compute_bill(
+        split_mode="itemized",
+        participants=[
+            {"party": "u:1", "weight": 1, "exempt": True},
+            {"party": "u:2", "weight": 1},
+        ],
+        items=[
+            {"id": 1, "parent_id": None, "label": "Cake", "amount_cents": 2000,
+             "shares": {"u:1": 1}},
+            {"id": 2, "parent_id": None, "label": "Tea", "amount_cents": 400,
+             "shares": {"u:2": 1}},
+        ],
+    )
+    sam = r["per_party"]["u:2"]["lines"]
+    assert [(x["kind"], x["cents"]) for x in sam] == [("item", 400), ("covering", 2000)]
+    assert sam[1]["parties"] == ["u:1"]
+
+    # The birthday person keeps the record of what they had, even though it is
+    # on everybody else's tab - that is the useful thing to be able to open.
+    assert [(x["label"], x["cents"]) for x in r["per_party"]["u:1"]["lines"]] == [("Cake", 2000)]
+    assert r["per_party"]["u:1"]["owed_cents"] == 0
+
+
 # --- the birthday rule -------------------------------------------------------
 
 def test_the_birthday_person_pays_nothing_and_everyone_else_covers_it():

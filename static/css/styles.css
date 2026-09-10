@@ -501,6 +501,31 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; white-sp
 }
 .totals-line.unassigned .v { font-weight: 680; }
 .totals-line.unassigned .faint { color: inherit; opacity: .8; font-weight: 400; }
+.unassigned-block .expander { color: var(--warn); }
+
+/* --- what one figure is made of ------------------------------------------
+   The lines behind somebody's total, opened from the + under their name. */
+.expander {
+  margin-top: 4px; padding: 1px 7px 1px 4px; min-height: 22px;
+  font-size: .74rem; font-weight: 600; gap: 4px;
+}
+.expander .pm {
+  display: inline-grid; place-items: center; width: 14px; height: 14px;
+  border-radius: 4px; background: var(--surface-3); color: var(--text-dim);
+  font-size: .8rem; line-height: 1;
+}
+.expander:hover .pm { background: var(--accent-soft); color: var(--accent); }
+
+.who-had {
+  margin: 5px 0 3px; padding: 6px 9px;
+  border-radius: var(--radius-sm); background: var(--surface-2);
+  border: 1px solid var(--border);
+}
+.who-had-line { display: flex; justify-content: space-between; gap: 10px; padding: 2px 0; font-size: .78rem; }
+.who-had-line .n { color: var(--text-dim); min-width: 0; }
+.who-had-line .v { flex: none; color: var(--text); font-variant-numeric: tabular-nums; }
+.who-had-line.sum { margin-top: 3px; padding-top: 4px; border-top: 1px solid var(--border); font-weight: 650; }
+.who-had-line.sum .n { color: var(--text); }
 
 /* --- toasts and modal ---------------------------------------------------- */
 .toasts {

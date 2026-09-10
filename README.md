@@ -125,6 +125,12 @@ put their card down, in which case they are simply owed all of it back.
 **Live search.** Long bills get a search box over the item list and over *Who
 paid*, filtering as you type without disturbing anything you are editing.
 
+**See what makes up a figure.** Every person in the breakdown has a **+** under
+their name that opens the lines behind their share — each item, what it cost
+them, and whether it was shared. Unclaimed money opens the same way, so you can
+see exactly what is still going spare. The entries are written by the split
+engine as it moves the money, so they cannot disagree with the total.
+
 **Sub-items for modifications.** Hang extras off a line — add bacon, oat milk,
 no onions, extra cheese. A sub-item is never claimed on its own: its cost
 follows whoever took the parent, so ticking the burger picks up its bacon
@@ -343,6 +349,11 @@ install.sh       the one-script installer
 - **The search boxes hide rows in place; they do not rebuild the list.** Same
   reason the form only rebuilds on structural changes: rebuilding on keystroke
   tears the input out from under whoever is typing.
+- **The per-person line ledger is written by the allocation, not derived from
+  it.** Each entry is recorded at the moment the cents move, so "why do I owe
+  $54.00" is answered by the arithmetic that produced the $54.00 rather than by
+  a second calculation that could drift. An assertion checks the entries sum to
+  that person's base on every bill, including the 400 in the fuzz test.
 
 ## Tests
 

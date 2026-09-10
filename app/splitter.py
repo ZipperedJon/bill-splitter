@@ -201,11 +201,40 @@ def compute_bill(
     unclaimed_cents = 0   # what ends up on the UNASSIGNED bucket
     unassigned_lines = 0  # top-level lines nobody ticked at all
 
+    # Which lines made up each person's base, recorded as the allocation
+    # happens rather than worked out again afterwards - so "why do I owe
+    # $54.00" is answered by the same arithmetic that produced the $54.00.
+    ledger: dict[str, list[dict[str, Any]]] = {}
+    entries: dict[tuple[str, Any], dict[str, Any]] = {}
+    by_id = {it["id"]: it for it in item_list if it.get("id") is not None}
+
+    def credit(party: str, item: dict[str, Any], key: Any, cents: int, **extra: Any) -> None:
+        """Put `cents` of `item` on `party`'s tab, folding sub-items into their
+        parent: whoever took the burger took its bacon, and one line is what a
+        human sees on the receipt."""
+        entry = entries.get((party, key))
+        if entry is None:
+            parent = by_id.get(item.get("parent_id"))
+            entry = {
+                "id": key,
+                "label": (parent or item).get("label") or "An item",
+                "cents": 0,
+                "kind": "item",
+                **extra,
+            }
+            entries[(party, key)] = entry
+            ledger.setdefault(party, []).append(entry)
+        entry["cents"] += cents
+
     if split_mode == "itemized":
         subtotal = sum(int(it.get("amount_cents", 0)) for it in item_list)
-        by_id = {it["id"]: it for it in item_list if it.get("id") is not None}
 
-        for item in item_list:
+        for position, item in enumerate(item_list):
+            # One key per top-level line, so a modification lands on its parent.
+            # The position is only a fallback for items with no id at all.
+            line_key = item.get("parent_id")
+            if line_key is None:
+                line_key = item.get("id") if item.get("id") is not None else f"#{position}"
             amount = int(item.get("amount_cents", 0))
             label = item.get("label") or "An item"
             portions = max(1, int(item.get("portions") or 1))
@@ -223,9 +252,12 @@ def compute_bill(
                     unassigned_lines += 1
                 if leave_unclaimed:
                     unclaimed_cents += amount
+                    credit(UNASSIGNED, item, line_key, amount, kind="unclaimed")
                 else:
                     for party, cents in zip(parties, allocate(amount, [1.0] * len(parties))):
                         base[party] += cents
+                        credit(party, item, line_key, cents,
+                               kind="unclaimed", sharers=len(parties))
                 continue
 
             keys = [p for p in parties if p in shares]  # stable order
@@ -234,6 +266,7 @@ def compute_bill(
                 # An ordinary line shared by whoever is on it.
                 for party, cents in zip(keys, allocate(amount, [shares[p] for p in keys])):
                     base[party] += cents
+                    credit(party, item, line_key, cents, sharers=len(keys))
                 continue
 
             # A divided line has a *price per portion*, not a proportion of the
@@ -255,6 +288,7 @@ def compute_bill(
                 )
                 for party, cents in zip(keys, allocate(amount, [shares[p] for p in keys])):
                     base[party] += cents
+                    credit(party, item, line_key, cents, sharers=len(keys))
                 continue
 
             prices = allocate(amount, [1] * portions)
@@ -263,7 +297,9 @@ def compute_bill(
                 count = taken[party]
                 if count <= 0:
                     continue
-                base[party] += sum(prices[cursor:cursor + count])
+                mine = sum(prices[cursor:cursor + count])
+                base[party] += mine
+                credit(party, item, line_key, mine, sharers=len(keys), units=count)
                 cursor += count
 
             unclaimed = prices[cursor:]
@@ -276,6 +312,8 @@ def compute_bill(
                     # unassigned_cents: the line looks claimed, and only this
                     # says that part of it is not.
                     unclaimed_cents += left
+                    credit(UNASSIGNED, item, line_key, left, kind="unclaimed",
+                           units=len(unclaimed), of=portions)
                     warnings.append(
                         f"{label}: {len(unclaimed)} of {portions} portions "
                         f"({money(left)}) not taken by anyone - left unassigned."
@@ -283,6 +321,7 @@ def compute_bill(
                 else:
                     for party, cents in zip(parties, allocate(left, [1.0] * len(parties))):
                         base[party] += cents
+                        credit(party, item, line_key, cents, kind="unclaimed")
                     warnings.append(
                         f"{label}: {len(unclaimed)} of {portions} portions "
                         f"({money(left)}) not taken by anyone - split evenly across everyone."
@@ -305,6 +344,11 @@ def compute_bill(
         w = [1.0] * len(parties) if split_mode == "even" else [weights[p] for p in parties]
         for party, cents in zip(parties, allocate(subtotal, w)):
             base[party] = cents
+            if cents:
+                ledger.setdefault(party, []).append(
+                    {"id": None, "label": "", "cents": cents,
+                     "kind": split_mode, "sharers": len(parties)}
+                )
 
     # --- 1b. whoever is not paying -------------------------------------------
     # The birthday rule. Their share moves to the people who *are* paying, which
@@ -322,6 +366,12 @@ def compute_bill(
             )
             for party, cents in zip(payers, allocate(covered, spread)):
                 base[party] += cents
+                # Its own line in the ledger, so the extra on somebody's tab is
+                # explained rather than looking like an item they never had.
+                ledger.setdefault(party, []).append(
+                    {"id": None, "label": "", "cents": cents, "kind": "covering",
+                     "parties": sorted(exempt)}
+                )
 
     # --- 1c. the unassigned bucket -------------------------------------------
     # From here on everything is apportioned across `holders`: the people, plus
@@ -467,6 +517,7 @@ def compute_bill(
     per_party: dict[str, dict[str, Any]] = {}
     for party in parties:
         owed = owed_by(party)
+        lines = ledger.get(party, [])
         per_party[party] = {
             "base_cents": base[party],
             "discount_cents": discount_share[party],
@@ -478,7 +529,16 @@ def compute_bill(
             "paid_cents": paid[party],
             "balance_cents": paid[party] - owed,  # >0 they are owed money
             "exempt": party in exempt,
+            # What made up base_cents, line by line. For somebody who is not
+            # paying this is still what they had - it is simply on everyone
+            # else's tab, which is what `exempt` says.
+            "lines": lines,
         }
+        # The ledger is written by the same code that moves the money, so a
+        # mismatch means one of the two branches forgot the other.
+        assert party in exempt or sum(x["cents"] for x in lines) == base[party], (
+            "the per-person line ledger does not add up to their base"
+        )
 
     unassigned = owed_by(UNASSIGNED) if UNASSIGNED in holders else 0
 
@@ -504,6 +564,7 @@ def compute_bill(
         # How many lines are in that bucket. Zero when they were shared out
         # instead, so the pair always describes the same thing.
         "unassigned_items": unassigned_lines if leave_unclaimed else 0,
+        "unassigned_lines": ledger.get(UNASSIGNED, []),
         "exempt_parties": sorted(exempt),
         "per_party": per_party,
         "warnings": warnings,
@@ -525,6 +586,7 @@ def _empty_result(warnings: list[str] | None = None) -> dict[str, Any]:
         "unpaid_cents": 0,
         "unassigned_cents": 0,
         "unassigned_items": 0,
+        "unassigned_lines": [],
         "exempt_parties": [],
         "per_party": {},
         "warnings": warnings or [],
